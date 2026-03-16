@@ -1,0 +1,2449 @@
+<roblox version="4">
+  <Item class="ReplicatedStorage" referent="0">
+    <Properties>
+      <string name="Name">ReplicatedStorage</string>
+    </Properties>
+    <Item class="ModuleScript" referent="1">
+      <Properties>
+        <string name="Name">DegradationSystem</string>
+        <string name="Source"><![CDATA[-- DegradationSystem.lua
+-- ModuleScript: handles fleet degradation, trade contraction, and island visual decay
+-- when a nation's trading performance is poor.
+-- Place in ReplicatedStorage
+
+local RS     = game:GetService("ReplicatedStorage")
+local Config = require(RS:WaitForChild("GameConfig"))
+
+local DegradationSystem = {}
+
+-- ─── Degradation Level Constants ─────────────────────────────────────────────
+
+DegradationSystem.Level = {
+    HEALTHY    = "healthy",
+    STRUGGLING = "struggling",
+    CRITICAL   = "critical",
+    BANKRUPT   = "bankrupt",
+}
+
+-- Island colors per degradation level
+local ISLAND_COLORS = {
+    healthy    = Color3.fromRGB(95,  130, 60),   -- lush green
+    struggling = Color3.fromRGB(180, 155, 60),   -- sandy yellow
+    critical   = Color3.fromRGB(130, 90,  40),   -- dry brown
+    bankrupt   = Color3.fromRGB(70,  65,  65),   -- ash grey
+}
+
+-- ─── Helpers ─────────────────────────────────────────────────────────────────
+
+-- getDegradationLevel(nation) → Level string
+function DegradationSystem.getDegradationLevel(nation)
+    local w = nation.wealth
+    if w >= Config.DEGRADE_THRESHOLD_STRUGGLING then
+        return DegradationSystem.Level.HEALTHY
+    elseif w >= Config.DEGRADE_THRESHOLD_CRITICAL then
+        return DegradationSystem.Level.STRUGGLING
+    elseif w >= Config.DEGRADE_THRESHOLD_BANKRUPT then
+        return DegradationSystem.Level.CRITICAL
+    else
+        return DegradationSystem.Level.BANKRUPT
+    end
+end
+
+-- getExportPenalty(nation) → multiplier (0–1)
+-- Applied in TradeSystem to reduce export income when a nation is degraded.
+function DegradationSystem.getExportPenalty(nation)
+    local level = DegradationSystem.getDegradationLevel(nation)
+    if level == DegradationSystem.Level.HEALTHY then
+        return 1.0
+    elseif level == DegradationSystem.Level.STRUGGLING then
+        return Config.DEGRADE_EXPORT_PENALTY_STRUGGLING
+    elseif level == DegradationSystem.Level.CRITICAL then
+        return Config.DEGRADE_EXPORT_PENALTY_CRITICAL
+    else
+        return Config.DEGRADE_EXPORT_PENALTY_BANKRUPT
+    end
+end
+
+-- ─── Core: Apply Degradation Effects ─────────────────────────────────────────
+
+-- applyDegradation(nation, scenario, logs)
+-- Modifies `nation` in-place (tradeShips, warships, navyCost, degradationLevel).
+-- Appends event strings to `logs`.
+function DegradationSystem.applyDegradation(nation, scenario, logs)
+    local level = DegradationSystem.getDegradationLevel(nation)
+    nation.degradationLevel = level
+
+    -- Track consecutive ticks with negative trade balance
+    if (nation.tradeBalance or 0) < 0 then
+        nation.consecutiveNegativeTicks = (nation.consecutiveNegativeTicks or 0) + 1
+    else
+        nation.consecutiveNegativeTicks = 0
+    end
+
+    -- ── STRUGGLING ────────────────────────────────────────────────────────────
+    -- After several consecutive losing ticks, abandon one trade route.
+    if level == DegradationSystem.Level.STRUGGLING then
+        local consec = nation.consecutiveNegativeTicks or 0
+        if consec >= Config.DEGRADE_CONSEC_TICKS_FOR_SHIP_LOSS
+            and nation.tradeShips > Config.DEGRADE_MIN_TRADE_SHIPS
+        then
+            nation.tradeShips = nation.tradeShips - 1
+            nation.consecutiveNegativeTicks = 0
+            local msg = string.format(
+                "[DECAY] %s abandons a trade route after %d losing seasons. Trade ships: %d",
+                nation.name, consec, nation.tradeShips
+            )
+            table.insert(logs, msg)
+            print(msg)
+        end
+    end
+
+    -- ── CRITICAL ──────────────────────────────────────────────────────────────
+    -- Warship desertion + chance of trade-ship breakdown.
+    if level == DegradationSystem.Level.CRITICAL then
+        -- Warship desertion: soldiers go unpaid and leave
+        if nation.warships > 1 and math.random() < Config.DEGRADE_DESERTION_CHANCE then
+            nation.warships = nation.warships - 1
+            nation.navyCost = nation.warships * Config.WARSHIP_COST_PER_TICK
+            local msg = string.format(
+                "[DECAY] %s loses a warship — soldiers desert; unpaid wages. Warships: %d",
+                nation.name, nation.warships
+            )
+            table.insert(logs, msg)
+            print(msg)
+        end
+
+        -- Trade-ship breakdown: vessel falls to disrepair
+        if nation.tradeShips > Config.DEGRADE_MIN_TRADE_SHIPS
+            and math.random() < Config.DEGRADE_SHIP_LOSS_CHANCE_CRITICAL
+        then
+            nation.tradeShips = nation.tradeShips - 1
+            local msg = string.format(
+                "[DECAY] %s loses a trade ship — vessel falls to disrepair. Trade ships: %d",
+                nation.name, nation.tradeShips
+            )
+            table.insert(logs, msg)
+            print(msg)
+        end
+    end
+
+    -- ── BANKRUPT ──────────────────────────────────────────────────────────────
+    -- Rapid fleet collapse; both ship types lost at high probability.
+    if level == DegradationSystem.Level.BANKRUPT then
+        if nation.tradeShips > Config.DEGRADE_MIN_TRADE_SHIPS
+            and math.random() < Config.DEGRADE_SHIP_LOSS_CHANCE_BANKRUPT
+        then
+            nation.tradeShips = nation.tradeShips - 1
+            local msg = string.format(
+                "[BANKRUPT] %s loses a trade ship — treasury empty, fleet collapses. Ships: %d",
+                nation.name, nation.tradeShips
+            )
+            table.insert(logs, msg)
+            print(msg)
+        end
+
+        if nation.warships > 1
+            and math.random() < Config.DEGRADE_SHIP_LOSS_CHANCE_BANKRUPT
+        then
+            nation.warships = nation.warships - 1
+            nation.navyCost = nation.warships * Config.WARSHIP_COST_PER_TICK
+            local msg = string.format(
+                "[BANKRUPT] %s loses a warship — navy abandoned. Warships: %d",
+                nation.name, nation.warships
+            )
+            table.insert(logs, msg)
+            print(msg)
+        end
+    end
+end
+
+-- ─── Visual: Island Color Update ─────────────────────────────────────────────
+
+-- updateIslandVisuals(nation)
+-- Changes the island's base color and transparency in Workspace to reflect
+-- the nation's current degradation level.
+function DegradationSystem.updateIslandVisuals(nation)
+    local level = DegradationSystem.getDegradationLevel(nation)
+    local targetColor = ISLAND_COLORS[level]
+
+    local islandsFolder = workspace:FindFirstChild("Islands")
+    if not islandsFolder then return end
+
+    local islandModel = islandsFolder:FindFirstChild(nation.name)
+    if not islandModel then return end
+
+    local islandBase = islandModel:FindFirstChild("IslandBase")
+    if not islandBase then return end
+
+    islandBase.Color = targetColor
+
+    -- Bankrupt islands look visibly derelict (slightly transparent)
+    islandBase.Transparency = (level == DegradationSystem.Level.BANKRUPT) and 0.18 or 0
+end
+
+return DegradationSystem
+]]></string>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="2">
+      <Properties>
+        <string name="Name">GameConfig</string>
+        <string name="Source"><![CDATA[-- GameConfig.lua
+-- ModuleScript: pure constants for the Mercantilism Simulation
+-- Place in ReplicatedStorage
+
+local Config = {}
+
+Config.NATIONS = {
+    { id = 1, name = "England",     color = Color3.fromRGB(0, 36, 125),  resource = "Iron",   position = Vector3.new(-160, 1, -160) },
+    { id = 2, name = "France",      color = Color3.fromRGB(0, 85, 164),  resource = "Grain",  position = Vector3.new(160, 1, -160)  },
+    { id = 3, name = "Spain",       color = Color3.fromRGB(170, 21, 27), resource = "Spices", position = Vector3.new(-160, 1, 160)  },
+    { id = 4, name = "Netherlands", color = Color3.fromRGB(255, 174, 0), resource = "Wood",   position = Vector3.new(160, 1, 160)   },
+}
+
+Config.INITIAL_WEALTH         = 1000
+Config.TICK_DURATION          = 12      -- seconds per trading season
+Config.MAX_TICKS              = 24
+
+Config.BASE_EXPORT_INCOME     = 75
+Config.RESOURCE_BONUS         = 25
+Config.IMPORT_SPEND_RATIO     = 0.55
+
+Config.TARIFF_RATE            = 0.40
+Config.TARIFF_START_TICK      = 3
+Config.RETALIATION_DELAY      = 2
+
+Config.INITIAL_TRADE_SHIPS    = 2
+Config.INITIAL_WARSHIPS       = 1
+Config.WARSHIP_COST_PER_TICK  = 20
+Config.PLUNDER_SUCCESS_RATE   = 0.35
+Config.PLUNDER_AMOUNT         = 55
+Config.MAX_WARSHIPS           = 8
+
+Config.ARMS_RACE_ALPHA        = 1.15
+Config.ARMS_RACE_BETA         = 10
+
+Config.FREE_TRADE_BONUS       = 0.35
+
+-- Degradation thresholds (wealth levels)
+Config.DEGRADE_THRESHOLD_STRUGGLING       = 500   -- below this → struggling
+Config.DEGRADE_THRESHOLD_CRITICAL         = 200   -- below this → critical
+Config.DEGRADE_THRESHOLD_BANKRUPT         = 75    -- below this → bankrupt
+
+-- Degradation effects
+Config.DEGRADE_MIN_TRADE_SHIPS            = 1     -- floor on trade ships
+Config.DEGRADE_CONSEC_TICKS_FOR_SHIP_LOSS = 3     -- consecutive losing ticks before route abandoned
+Config.DEGRADE_DESERTION_CHANCE           = 0.40  -- prob of warship desertion per tick (critical)
+Config.DEGRADE_SHIP_LOSS_CHANCE_CRITICAL  = 0.30  -- prob of trade-ship loss per tick (critical)
+Config.DEGRADE_SHIP_LOSS_CHANCE_BANKRUPT  = 0.55  -- prob of ship loss per tick (bankrupt)
+
+-- Export income multipliers per degradation level
+Config.DEGRADE_EXPORT_PENALTY_STRUGGLING  = 0.85  -- 15% income reduction
+Config.DEGRADE_EXPORT_PENALTY_CRITICAL    = 0.65  -- 35% income reduction
+Config.DEGRADE_EXPORT_PENALTY_BANKRUPT    = 0.40  -- 60% income reduction
+
+Config.OCEAN_SIZE   = Vector3.new(520, 2, 520)
+Config.ISLAND_SIZE  = Vector3.new(60, 14, 60)
+Config.SHIP_SPEED   = 45
+
+Config.SCENARIOS = { MERCANTILIST = "mercantilist", FREE_TRADE = "freetrade" }
+
+return Config
+]]></string>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="3">
+      <Properties>
+        <string name="Name">NationState</string>
+        <string name="Source"><![CDATA[-- NationState.lua
+-- ModuleScript: manages in-memory state for all nations
+-- Place in ReplicatedStorage
+-- NOTE: This module is intended for server-side use only.
+-- Clients receive state updates via RemoteEvents.
+
+local RS = game:GetService("ReplicatedStorage")
+local Config = require(RS:WaitForChild("GameConfig"))
+
+local NationState = {}
+
+-- Private state
+local _nations = {}               -- keyed by nationId
+local _nationList = {}            -- ordered array
+local _globalWealthHistory = {}
+local _currentTick = 0
+local _scenario = nil
+local _retaliationCountdown = {}  -- keyed by nationId -> { [aggressorId] = ticksRemaining }
+local _tariffs = {}               -- _tariffs[fromId][targetId] = true/false
+
+-- ─── Initialization ──────────────────────────────────────────────────────────
+
+function NationState.init(scenario)
+    _nations = {}
+    _nationList = {}
+    _globalWealthHistory = {}
+    _currentTick = 0
+    _scenario = scenario
+    _retaliationCountdown = {}
+    _tariffs = {}
+
+    for _, nationData in ipairs(Config.NATIONS) do
+        local nation = {
+            id             = nationData.id,
+            name           = nationData.name,
+            color          = nationData.color,
+            resource       = nationData.resource,
+            position       = nationData.position,
+            wealth         = Config.INITIAL_WEALTH,
+            tradeShips     = Config.INITIAL_TRADE_SHIPS,
+            warships       = Config.INITIAL_WARSHIPS,
+            navyCost       = Config.INITIAL_WARSHIPS * Config.WARSHIP_COST_PER_TICK,
+            tariffs        = {},       -- tariffs[targetId] = true means this nation imposes tariff on targetId
+            exportEarnings = 0,
+            importSpending = 0,
+            plunderGained  = 0,
+            tradeBalance             = 0,
+            consecutiveNegativeTicks = 0,    -- ticks in a row with negative trade balance
+            degradationLevel         = "healthy",
+            tickHistory              = {},   -- array of { tick, exports, imports, plunder, navyCost, wealth }
+        }
+        _nations[nation.id] = nation
+        table.insert(_nationList, nation)
+
+        _retaliationCountdown[nation.id] = {}
+        _tariffs[nation.id] = {}
+    end
+end
+
+-- ─── Getters ─────────────────────────────────────────────────────────────────
+
+function NationState.getNation(id)
+    return _nations[id]
+end
+
+function NationState.getAllNations()
+    return _nationList
+end
+
+function NationState.getGlobalWealth()
+    local total = 0
+    for _, nation in ipairs(_nationList) do
+        total = total + nation.wealth
+    end
+    return total
+end
+
+function NationState.getGlobalWealthHistory()
+    return _globalWealthHistory
+end
+
+function NationState.getCurrentTick()
+    return _currentTick
+end
+
+function NationState.getScenario()
+    return _scenario
+end
+
+-- ─── Wealth Management ───────────────────────────────────────────────────────
+
+function NationState.updateWealth(nationId, delta)
+    local nation = _nations[nationId]
+    if not nation then
+        warn("[NationState] updateWealth: nation not found for id " .. tostring(nationId))
+        return
+    end
+    nation.wealth = math.max(0, nation.wealth + delta)
+end
+
+-- ─── Tick Data Recording ─────────────────────────────────────────────────────
+
+function NationState.recordTickData(nationId, exports, imports, plunder, navyCost)
+    local nation = _nations[nationId]
+    if not nation then
+        warn("[NationState] recordTickData: nation not found for id " .. tostring(nationId))
+        return
+    end
+
+    nation.exportEarnings = exports
+    nation.importSpending = imports
+    nation.plunderGained  = plunder
+    nation.navyCost       = navyCost
+    nation.tradeBalance   = exports - imports
+
+    table.insert(nation.tickHistory, {
+        tick      = _currentTick,
+        exports   = exports,
+        imports   = imports,
+        plunder   = plunder,
+        navyCost  = navyCost,
+        wealth    = nation.wealth,
+    })
+end
+
+-- ─── Tick Advancement ────────────────────────────────────────────────────────
+
+function NationState.advanceTick()
+    _currentTick = _currentTick + 1
+    local globalWealth = NationState.getGlobalWealth()
+    table.insert(_globalWealthHistory, {
+        tick   = _currentTick,
+        wealth = globalWealth,
+    })
+end
+
+-- ─── Tariff Management ───────────────────────────────────────────────────────
+
+-- setTariff(fromId, targetId, enabled)
+-- If enabled = true, starts a retaliation countdown for the target nation.
+function NationState.setTariff(fromId, targetId, enabled)
+    local nation = _nations[fromId]
+    if not nation then
+        warn("[NationState] setTariff: nation not found for id " .. tostring(fromId))
+        return
+    end
+
+    if _tariffs[fromId] == nil then
+        _tariffs[fromId] = {}
+    end
+
+    local wasAlreadySet = _tariffs[fromId][targetId] == true
+    _tariffs[fromId][targetId] = enabled or false
+    nation.tariffs[targetId] = enabled or false
+
+    -- Start retaliation countdown for the targeted nation (they may retaliate)
+    if enabled and not wasAlreadySet then
+        local targetNation = _nations[targetId]
+        if targetNation then
+            if _retaliationCountdown[targetId] == nil then
+                _retaliationCountdown[targetId] = {}
+            end
+            -- The target will retaliate against fromId after RETALIATION_DELAY ticks
+            _retaliationCountdown[targetId][fromId] = Config.RETALIATION_DELAY
+        end
+    end
+end
+
+-- hasTariff(fromId, targetId) → bool
+-- Returns true if nation fromId has imposed a tariff on targetId.
+function NationState.hasTariff(fromId, targetId)
+    if _tariffs[fromId] == nil then
+        return false
+    end
+    return _tariffs[fromId][targetId] == true
+end
+
+-- tickRetaliationCountdowns()
+-- Decrements counters; when a countdown reaches 0,
+-- the nation retaliates by setting tariffs on whoever tariffed them.
+function NationState.tickRetaliationCountdowns()
+    for retaliatorId, countdowns in pairs(_retaliationCountdown) do
+        local toRemove = {}
+        for aggressorId, remaining in pairs(countdowns) do
+            local newRemaining = remaining - 1
+            if newRemaining <= 0 then
+                -- Retaliate: set tariff on the aggressor
+                local retaliator = _nations[retaliatorId]
+                local aggressor  = _nations[aggressorId]
+                if retaliator and aggressor then
+                    -- Only retaliate if not already tariffing them
+                    if not NationState.hasTariff(retaliatorId, aggressorId) then
+                        if _tariffs[retaliatorId] == nil then
+                            _tariffs[retaliatorId] = {}
+                        end
+                        _tariffs[retaliatorId][aggressorId] = true
+                        retaliator.tariffs[aggressorId] = true
+                        print(string.format(
+                            "[NationState] %s retaliates against %s with tariffs!",
+                            retaliator.name, aggressor.name
+                        ))
+                    end
+                end
+                table.insert(toRemove, aggressorId)
+            else
+                countdowns[aggressorId] = newRemaining
+            end
+        end
+        for _, aggressorId in ipairs(toRemove) do
+            countdowns[aggressorId] = nil
+        end
+    end
+end
+
+-- ─── Summary ─────────────────────────────────────────────────────────────────
+
+-- getSummary() → structured table of all nation data suitable for RemoteEvent firing
+function NationState.getSummary()
+    local summary = {
+        tick              = _currentTick,
+        scenario          = _scenario,
+        globalWealth      = NationState.getGlobalWealth(),
+        globalWealthHistory = _globalWealthHistory,
+        nations           = {},
+    }
+
+    for _, nation in ipairs(_nationList) do
+        -- Serialize Color3 and Vector3 as plain tables for RemoteEvent compatibility
+        local tariffList = {}
+        for targetId, active in pairs(nation.tariffs) do
+            if active then
+                table.insert(tariffList, targetId)
+            end
+        end
+
+        table.insert(summary.nations, {
+            id             = nation.id,
+            name           = nation.name,
+            colorR         = nation.color.R,
+            colorG         = nation.color.G,
+            colorB         = nation.color.B,
+            resource       = nation.resource,
+            wealth         = nation.wealth,
+            tradeShips     = nation.tradeShips,
+            warships       = nation.warships,
+            navyCost       = nation.navyCost,
+            exportEarnings = nation.exportEarnings,
+            importSpending = nation.importSpending,
+            plunderGained  = nation.plunderGained,
+            tradeBalance             = nation.tradeBalance,
+            activeTariffs            = tariffList,
+            degradationLevel         = nation.degradationLevel or "healthy",
+            consecutiveNegativeTicks = nation.consecutiveNegativeTicks or 0,
+        })
+    end
+
+    return summary
+end
+
+return NationState
+]]></string>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="4">
+      <Properties>
+        <string name="Name">NavalSystem</string>
+        <string name="Source"><![CDATA[-- NavalSystem.lua
+-- ModuleScript: naval combat, plunder, and arms race calculations
+-- Place in ReplicatedStorage
+
+local RS = game:GetService("ReplicatedStorage")
+local Config = require(RS:WaitForChild("GameConfig"))
+
+local NavalSystem = {}
+
+-- ─── Plunder Resolution ───────────────────────────────────────────────────────
+
+-- resolvePlunder(nations, scenario)
+-- Applies plunder directly to the nations table entries.
+-- Returns plunderResults: table { [victimId] = totalStolen, [plunderId/attackerId] = totalGained }
+-- Gains and losses are both tracked in the same table with separate keys.
+function NavalSystem.resolvePlunder(nations, scenario)
+    -- Skip plunder in free trade scenario
+    if scenario == Config.SCENARIOS.FREE_TRADE then
+        return {}
+    end
+
+    local plunderResults = {}
+    -- plunderResults[nationId] stores both stolen (negative) and gained (positive) separately
+    -- Use a structured log instead:
+    -- plunderLog[nationId] = { gained = number, lost = number }
+    local plunderLog = {}
+
+    for _, nation in ipairs(nations) do
+        plunderLog[nation.id] = { gained = 0, lost = 0 }
+    end
+
+    -- For each attacker nation, attempt to plunder each rival
+    for _, attacker in ipairs(nations) do
+        if attacker.warships > 0 then
+            for _, victim in ipairs(nations) do
+                if victim.id ~= attacker.id then
+                    -- Each warship of the attacker has PLUNDER_SUCCESS_RATE chance
+                    -- to intercept a trade ship of the victim
+                    for _ = 1, attacker.warships do
+                        if victim.tradeShips > 0 then
+                            local roll = math.random()
+                            if roll <= Config.PLUNDER_SUCCESS_RATE then
+                                -- Successful intercept
+                                local amount = math.min(Config.PLUNDER_AMOUNT, victim.wealth)
+                                if amount > 0 then
+                                    -- Transfer wealth
+                                    victim.wealth  = math.max(0, victim.wealth - amount)
+                                    attacker.wealth = attacker.wealth + amount
+
+                                    -- Accumulate into plunder tracking
+                                    plunderLog[victim.id].lost    = plunderLog[victim.id].lost + amount
+                                    plunderLog[attacker.id].gained = plunderLog[attacker.id].gained + amount
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- Update plunderGained field on each nation and build results table
+    for _, nation in ipairs(nations) do
+        local log = plunderLog[nation.id]
+        nation.plunderGained = log.gained
+
+        -- Flatten into the return format: victimId → totalStolen, attackerId → totalGained
+        -- (We use positive numbers for both; callers distinguish by context)
+        if log.gained > 0 then
+            plunderResults[nation.id] = plunderResults[nation.id] or 0
+            plunderResults[nation.id] = plunderResults[nation.id] + log.gained
+        end
+        if log.lost > 0 then
+            -- Store losses as negative to differentiate
+            local lostKey = "lost_" .. nation.id
+            plunderResults[lostKey] = log.lost
+        end
+    end
+
+    return plunderResults
+end
+
+-- ─── Naval Cost Calculation ───────────────────────────────────────────────────
+
+-- calculateNavalCost(nation, scenario) → number
+function NavalSystem.calculateNavalCost(nation, scenario)
+    if scenario == Config.SCENARIOS.FREE_TRADE then
+        -- In free trade, only baseline maintenance applies
+        return Config.ARMS_RACE_BETA
+    end
+
+    -- Mercantilist: full warship maintenance
+    return nation.warships * Config.WARSHIP_COST_PER_TICK
+end
+
+-- ─── Navy Size Update (Arms Race) ────────────────────────────────────────────
+
+-- updateNavySize(nation, allNations, currentTick, scenario)
+-- Arms race reaction: respond to rivals' naval buildup.
+function NavalSystem.updateNavySize(nation, allNations, currentTick, scenario)
+    -- Only act in mercantilist scenario
+    if scenario ~= Config.SCENARIOS.MERCANTILIST then
+        return
+    end
+
+    -- Only act after tick 1
+    if currentTick <= 1 then
+        return
+    end
+
+    -- Find the maximum rival naval cost
+    local maxRivalCost = 0
+    for _, other in ipairs(allNations) do
+        if other.id ~= nation.id then
+            local rivalCost = other.warships * Config.WARSHIP_COST_PER_TICK
+            if rivalCost > maxRivalCost then
+                maxRivalCost = rivalCost
+            end
+        end
+    end
+
+    -- Arms race reaction function: C_i(t+1) = alpha * C_j(t) + beta
+    local targetCost = Config.ARMS_RACE_ALPHA * maxRivalCost + Config.ARMS_RACE_BETA
+
+    -- Convert target cost to warship count
+    local targetWarships = math.floor(targetCost / Config.WARSHIP_COST_PER_TICK)
+    targetWarships = math.max(1, math.min(Config.MAX_WARSHIPS, targetWarships))
+
+    -- Only build if we can afford it
+    local canAfford = nation.wealth > (Config.WARSHIP_COST_PER_TICK * 5)
+    if targetWarships > nation.warships and canAfford then
+        nation.warships = nation.warships + 1
+        print(string.format(
+            "[NavalSystem] %s builds a new warship (now %d warships). Arms race escalation.",
+            nation.name, nation.warships
+        ))
+    end
+
+    -- Update navy cost
+    nation.navyCost = nation.warships * Config.WARSHIP_COST_PER_TICK
+end
+
+return NavalSystem
+]]></string>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="5">
+      <Properties>
+        <string name="Name">TradeSystem</string>
+        <string name="Source"><![CDATA[-- TradeSystem.lua
+-- ModuleScript: pure trade calculations
+-- Place in ReplicatedStorage
+
+local RS                = game:GetService("ReplicatedStorage")
+local Config            = require(RS:WaitForChild("GameConfig"))
+local DegradationSystem = require(RS:WaitForChild("DegradationSystem"))
+
+local TradeSystem = {}
+
+-- ─── Resource Demand Matrix ───────────────────────────────────────────────────
+-- resourceDemand[resource] = { list of resources that demand it }
+-- Equivalently: which producing nations want each resource?
+--   Iron   ← demanded by nations producing Grain, Wood
+--   Grain  ← demanded by nations producing Spices, Iron
+--   Spices ← demanded by nations producing Wood, Grain
+--   Wood   ← demanded by nations producing Iron, Spices
+
+-- demandedBy[resource] = set of producer-resources that want it
+local demandedBy = {
+    Iron   = { Grain = true, Wood = true },
+    Grain  = { Spices = true, Iron = true },
+    Spices = { Wood = true, Grain = true },
+    Wood   = { Iron = true, Spices = true },
+}
+
+-- Returns true if `buyerResource` (the buyer nation's primary resource)
+-- means that buyer nation demands `sellerResource`.
+local function isResourceDemanded(sellerResource, buyerResource)
+    local demanders = demandedBy[sellerResource]
+    if not demanders then return false end
+    return demanders[buyerResource] == true
+end
+
+-- ─── Export Calculation ───────────────────────────────────────────────────────
+
+-- calculateExports(nation, allNations, scenario)
+-- Returns: totalExports (number), breakdown (table: nationId → amount)
+function TradeSystem.calculateExports(nation, allNations, scenario)
+    local totalExports = 0
+    local breakdown = {}
+
+    -- Identify trade partners (all other nations)
+    local partners = {}
+    for _, other in ipairs(allNations) do
+        if other.id ~= nation.id then
+            table.insert(partners, other)
+        end
+    end
+
+    local numRoutes = #partners
+    if numRoutes == 0 then
+        return 0, {}
+    end
+
+    -- Free trade applies a global income multiplier
+    local freeTradeMultiplier = 1.0
+    if scenario == Config.SCENARIOS.FREE_TRADE then
+        freeTradeMultiplier = 1 + Config.FREE_TRADE_BONUS
+    end
+
+    for _, partner in ipairs(partners) do
+        -- Base income per route, split evenly across trade ships
+        local routeIncome = Config.BASE_EXPORT_INCOME * (nation.tradeShips / numRoutes)
+
+        -- Resource bonus if our resource is demanded by the partner
+        if isResourceDemanded(nation.resource, partner.resource) then
+            routeIncome = routeIncome + Config.RESOURCE_BONUS
+        end
+
+        -- Apply free trade multiplier
+        routeIncome = routeIncome * freeTradeMultiplier
+
+        -- Tariff reduction: if partner has imposed tariffs on us, reduce income
+        if scenario == Config.SCENARIOS.MERCANTILIST then
+            -- Check if the partner nation has a tariff on us (the exporter)
+            -- We need to know if partner.tariffs[nation.id] is true
+            if partner.tariffs and partner.tariffs[nation.id] then
+                routeIncome = routeIncome * (1 - Config.TARIFF_RATE)
+            end
+        end
+
+        routeIncome = math.max(0, routeIncome)
+        breakdown[partner.id] = routeIncome
+        totalExports = totalExports + routeIncome
+    end
+
+    -- Apply degradation export penalty (struggling/critical/bankrupt nations earn less
+    -- because their infrastructure is decayed and trading partners lose confidence)
+    local penalty = DegradationSystem.getExportPenalty(nation)
+    if penalty < 1.0 then
+        totalExports = totalExports * penalty
+        for id, amt in pairs(breakdown) do
+            breakdown[id] = amt * penalty
+        end
+    end
+
+    return totalExports, breakdown
+end
+
+-- ─── Import Calculation ───────────────────────────────────────────────────────
+
+-- calculateImports(nation, exports, scenario)
+-- Returns: import spending (number)
+function TradeSystem.calculateImports(nation, exports, scenario)
+    local base = exports * Config.IMPORT_SPEND_RATIO
+
+    if scenario == Config.SCENARIOS.MERCANTILIST then
+        -- Count how many tariffs this nation has actively imposed
+        local activeTariffCount = 0
+        if nation.tariffs then
+            for _, active in pairs(nation.tariffs) do
+                if active then
+                    activeTariffCount = activeTariffCount + 1
+                end
+            end
+        end
+
+        if activeTariffCount > 0 then
+            -- Reduce imports proportionally to tariff usage (capped at 80% reduction)
+            local reductionFactor = Config.TARIFF_RATE * activeTariffCount * 0.4
+            reductionFactor = math.min(reductionFactor, 0.80)
+            base = base * (1 - reductionFactor)
+        end
+    end
+
+    return math.max(0, base)
+end
+
+-- ─── Tariff Policy AI ────────────────────────────────────────────────────────
+
+-- evaluateTariffPolicy(nation, allNations, currentTick, nationState, scenario)
+-- AI decision: imposes tariffs if trade balance is negative (mercantilist only,
+-- after TARIFF_START_TICK).
+function TradeSystem.evaluateTariffPolicy(nation, allNations, currentTick, nationState, scenario)
+    -- Only act in mercantilist scenario
+    if scenario ~= Config.SCENARIOS.MERCANTILIST then
+        return
+    end
+
+    -- Only act after TARIFF_START_TICK
+    if currentTick < Config.TARIFF_START_TICK then
+        return
+    end
+
+    -- If trade balance is negative, impose tariffs on all partners
+    if nation.tradeBalance < 0 then
+        print(string.format(
+            "[TradeSystem] %s has negative trade balance (%d g). Imposing tariffs on all partners.",
+            nation.name, math.floor(nation.tradeBalance)
+        ))
+
+        for _, other in ipairs(allNations) do
+            if other.id ~= nation.id then
+                -- Only set if not already tariffing them
+                if not nationState.hasTariff(nation.id, other.id) then
+                    nationState.setTariff(nation.id, other.id, true)
+                    print(string.format(
+                        "[TradeSystem] %s imposes tariff on %s.",
+                        nation.name, other.name
+                    ))
+                end
+            end
+        end
+    end
+end
+
+return TradeSystem
+]]></string>
+      </Properties>
+    </Item>
+  </Item>
+  <Item class="ServerScriptService" referent="6">
+    <Properties>
+      <string name="Name">ServerScriptService</string>
+    </Properties>
+    <Item class="Script" referent="7">
+      <Properties>
+        <string name="Name">GameManager</string>
+        <token name="RunContext">0</token>
+        <string name="Source"><![CDATA[-- GameManager.server.lua
+-- Server Script: main game loop, orchestrates the simulation
+-- Place in ServerScriptService
+
+local RS          = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+local RunService  = game:GetService("RunService")
+
+local Config            = require(RS:WaitForChild("GameConfig"))
+local NationState       = require(RS:WaitForChild("NationState"))
+local TradeSystem       = require(RS:WaitForChild("TradeSystem"))
+local NavalSystem       = require(RS:WaitForChild("NavalSystem"))
+local DegradationSystem = require(RS:WaitForChild("DegradationSystem"))
+
+-- ─── RemoteEvent Setup ────────────────────────────────────────────────────────
+
+local simEventsFolder = Instance.new("Folder")
+simEventsFolder.Name   = "SimEvents"
+simEventsFolder.Parent = RS
+
+local function makeRemote(name)
+    local re = Instance.new("RemoteEvent")
+    re.Name   = name
+    re.Parent = simEventsFolder
+    return re
+end
+
+local wealthUpdatedEvent   = makeRemote("WealthUpdated")
+local tickLogEvent         = makeRemote("TickLog")
+local simEndedEvent        = makeRemote("SimulationEnded")
+local comparisonEvent      = makeRemote("ComparisonReady")
+local startSimulationEvent = makeRemote("StartSimulation")
+
+-- ─── Wait for MapSetup to finish ─────────────────────────────────────────────
+
+task.wait(3)
+
+-- ─── Ship Animation Helper ────────────────────────────────────────────────────
+
+-- animateShip(shipModel, fromPos, toPos, duration)
+-- Tweens the ship's PrimaryPart CFrame from fromPos to toPos.
+-- Returns the tween object.
+local function animateShip(shipModel, fromPos, toPos, duration)
+    if not shipModel or not shipModel.PrimaryPart then return nil end
+    local primaryPart = shipModel.PrimaryPart
+    local targetCFrame = CFrame.new(toPos) * CFrame.Angles(0, math.atan2(toPos.X - fromPos.X, toPos.Z - fromPos.Z), 0)
+    local tweenInfo = TweenInfo.new(duration, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut)
+    local tween = TweenService:Create(primaryPart, tweenInfo, { CFrame = targetCFrame })
+    tween:Play()
+    return tween
+end
+
+-- ─── Utility: find island model in workspace ──────────────────────────────────
+
+local function getIslandPosition(nationName)
+    local islandsFolder = workspace:FindFirstChild("Islands")
+    if not islandsFolder then return Vector3.new(0, 3, 0) end
+    local islandModel = islandsFolder:FindFirstChild(nationName)
+    if not islandModel or not islandModel.PrimaryPart then return Vector3.new(0, 3, 0) end
+    return islandModel.PrimaryPart.Position
+end
+
+-- ─── Utility: update treasury BillboardGui ────────────────────────────────────
+
+local function updateTreasuryLabels()
+    local islandsFolder = workspace:FindFirstChild("Islands")
+    if not islandsFolder then return end
+
+    for _, nation in ipairs(NationState.getAllNations()) do
+        local islandModel = islandsFolder:FindFirstChild(nation.name)
+        if islandModel then
+            -- Find LabelAnchor → TreasuryLabel → Frame → WealthText
+            local labelAnchor = islandModel:FindFirstChild("LabelAnchor")
+            if labelAnchor then
+                local treasuryBillboard = labelAnchor:FindFirstChild("TreasuryLabel")
+                if treasuryBillboard then
+                    local bg = treasuryBillboard:FindFirstChildOfClass("Frame")
+                    if bg then
+                        local wealthText = bg:FindFirstChild("WealthText")
+                        if wealthText then
+                            wealthText.Text = "Treasury: " .. math.floor(nation.wealth) .. "g"
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+-- ─── Utility: format number with commas ──────────────────────────────────────
+
+local function formatNumber(n)
+    local s = tostring(math.floor(n))
+    local result = ""
+    local len = #s
+    for i = 1, len do
+        if i > 1 and (len - i + 1) % 3 == 0 then
+            result = result .. ","
+        end
+        result = result .. s:sub(i, i)
+    end
+    return result
+end
+
+-- ─── Main Simulation Function ─────────────────────────────────────────────────
+
+local function runSimulation(scenario)
+    NationState.init(scenario)
+    print("=== Starting " .. scenario .. " simulation ===")
+
+    local tickLogs = {}
+    local allIslandPositions = {}
+
+    -- Pre-cache island positions
+    for _, nationData in ipairs(Config.NATIONS) do
+        allIslandPositions[nationData.id] = nationData.position + Vector3.new(0, 3, 0)
+    end
+
+    for tick = 1, Config.MAX_TICKS do
+        tickLogs = {}
+        table.insert(tickLogs, string.format("[Tick %d / %d] Scenario: %s", tick, Config.MAX_TICKS, scenario))
+
+        local allNations = NationState.getAllNations()
+
+        -- 3. Animate ships (fire-and-forget)
+        local shipsFolder = workspace:FindFirstChild("Ships")
+        if shipsFolder then
+            for _, nation in ipairs(allNations) do
+                -- Collect trade ships for this nation
+                for i = 1, nation.tradeShips do
+                    local shipName = nation.name .. "_TradeShip_" .. i
+                    local shipModel = shipsFolder:FindFirstChild(shipName)
+                    if shipModel and shipModel.PrimaryPart then
+                        -- Pick a random target island (not own)
+                        local otherNations = {}
+                        for _, other in ipairs(allNations) do
+                            if other.id ~= nation.id then
+                                table.insert(otherNations, other)
+                            end
+                        end
+                        if #otherNations > 0 then
+                            local targetNation = otherNations[math.random(1, #otherNations)]
+                            local fromPos = shipModel.PrimaryPart.Position
+                            local toPos = allIslandPositions[targetNation.id]
+                            local distance = (toPos - fromPos).Magnitude
+                            local travelTime = math.max(2, distance / Config.SHIP_SPEED)
+                            -- fire-and-forget animation
+                            task.spawn(function()
+                                local tween = animateShip(shipModel, fromPos, toPos, travelTime)
+                                if tween then
+                                    tween.Completed:Wait()
+                                    -- Return to home port
+                                    local returnPos = allIslandPositions[nation.id]
+                                    animateShip(shipModel, toPos, returnPos, travelTime)
+                                end
+                            end)
+                        end
+                    end
+                end
+
+                -- Animate warships patrolling
+                for i = 1, nation.warships do
+                    local shipName = nation.name .. "_WarShip_" .. i
+                    local shipModel = shipsFolder:FindFirstChild(shipName)
+                    if shipModel and shipModel.PrimaryPart then
+                        local fromPos = shipModel.PrimaryPart.Position
+                        -- Patrol to a random position near own island
+                        local homePos = allIslandPositions[nation.id]
+                        local patrolOffset = Vector3.new(
+                            (math.random() - 0.5) * 80,
+                            0,
+                            (math.random() - 0.5) * 80
+                        )
+                        local toPos = homePos + patrolOffset
+                        local distance = (toPos - fromPos).Magnitude
+                        local travelTime = math.max(1.5, distance / Config.SHIP_SPEED)
+                        task.spawn(function()
+                            animateShip(shipModel, fromPos, toPos, travelTime)
+                        end)
+                    end
+                end
+            end
+        end
+
+        -- 4. Tariff decisions (AI)
+        for _, nation in ipairs(allNations) do
+            TradeSystem.evaluateTariffPolicy(nation, allNations, tick, NationState, scenario)
+        end
+        NationState.tickRetaliationCountdowns()
+
+        -- 5. Calculate economics for each nation
+        local exportResults  = {}
+        local importResults  = {}
+        local navyCostResults = {}
+
+        for _, nation in ipairs(allNations) do
+            local exports, breakdown = TradeSystem.calculateExports(nation, allNations, scenario)
+            local imports            = TradeSystem.calculateImports(nation, exports, scenario)
+            local navyCost           = NavalSystem.calculateNavalCost(nation, scenario)
+
+            exportResults[nation.id]   = exports
+            importResults[nation.id]   = imports
+            navyCostResults[nation.id] = navyCost
+        end
+
+        -- 6. Resolve plunder (modifies nations in-place)
+        local plunderLog = NavalSystem.resolvePlunder(allNations, scenario)
+        for nationId, amount in pairs(plunderLog) do
+            if type(nationId) == "number" then
+                local plunderer = NationState.getNation(nationId)
+                if plunderer and amount > 0 then
+                    local logMsg = string.format(
+                        "[PLUNDER] %s gained %dg from raids!",
+                        plunderer.name, math.floor(amount)
+                    )
+                    table.insert(tickLogs, logMsg)
+                    print(logMsg)
+                end
+            end
+        end
+
+        -- 7. Update navy sizes (arms race)
+        for _, nation in ipairs(allNations) do
+            NavalSystem.updateNavySize(nation, allNations, tick, scenario)
+        end
+
+        -- 8. Apply wealth changes for each nation
+        for _, nation in ipairs(allNations) do
+            local exports  = exportResults[nation.id]
+            local imports  = importResults[nation.id]
+            local navyCost = navyCostResults[nation.id]
+            local plunder  = nation.plunderGained or 0
+
+            -- Wealth formula: W_i(t) = W_i(t-1) + X_i - M_i + P_i - C_i
+            local delta = exports - imports + plunder - navyCost
+            NationState.updateWealth(nation.id, delta)
+            NationState.recordTickData(nation.id, exports, imports, plunder, navyCost)
+
+            table.insert(tickLogs, string.format(
+                "[%s] Exports: %dg | Imports: %dg | Plunder: %dg | Navy: %dg | Balance: %dg | Treasury: %dg",
+                nation.name,
+                math.floor(exports),
+                math.floor(imports),
+                math.floor(plunder),
+                math.floor(navyCost),
+                math.floor(delta),
+                math.floor(nation.wealth)
+            ))
+        end
+
+        -- 8.5 Apply degradation effects (fleet losses, income penalties, visual decay)
+        local degradeLogs = {}
+        for _, nation in ipairs(allNations) do
+            DegradationSystem.applyDegradation(nation, scenario, degradeLogs)
+            DegradationSystem.updateIslandVisuals(nation)
+        end
+        for _, msg in ipairs(degradeLogs) do
+            table.insert(tickLogs, msg)
+        end
+
+        -- 9. Update BillboardGuis
+        updateTreasuryLabels()
+
+        -- 10. Advance tick
+        NationState.advanceTick()
+
+        -- 11. Fire WealthUpdated RemoteEvent
+        local summary = NationState.getSummary()
+        wealthUpdatedEvent:FireAllClients(summary)
+
+        -- 12. Fire TickLog
+        local tickLogString = table.concat(tickLogs, "\n")
+        tickLogEvent:FireAllClients(tickLogString)
+
+        -- Print tick summary
+        print(string.format("[GameManager] Tick %d complete | Global Wealth: %sg",
+            tick, formatNumber(NationState.getGlobalWealth())))
+
+        -- 13. Wait for next tick
+        task.wait(Config.TICK_DURATION)
+    end
+
+    -- Build final results
+    local finalNations = NationState.getAllNations()
+    local globalWealth = NationState.getGlobalWealth()
+
+    -- Find winner nation
+    local winnerNation = finalNations[1]
+    for _, nation in ipairs(finalNations) do
+        if nation.wealth > winnerNation.wealth then
+            winnerNation = nation
+        end
+    end
+
+    local finalResults = {
+        scenario     = scenario,
+        globalWealth = globalWealth,
+        winnerName   = winnerNation.name,
+        winnerWealth = winnerNation.wealth,
+        nations      = {},
+    }
+    for _, nation in ipairs(finalNations) do
+        table.insert(finalResults.nations, {
+            id     = nation.id,
+            name   = nation.name,
+            wealth = nation.wealth,
+        })
+    end
+
+    -- Fire SimulationEnded
+    simEndedEvent:FireAllClients(finalResults)
+
+    -- Print final wealth table
+    print(string.format("=== %s Simulation Complete ===", scenario))
+    print(string.format("Global Wealth: %sg", formatNumber(globalWealth)))
+    for _, nation in ipairs(finalNations) do
+        print(string.format("  %s: %sg", nation.name, formatNumber(nation.wealth)))
+    end
+
+    return finalResults
+end
+
+-- ─── StartSimulation Remote Handler ──────────────────────────────────────────
+
+startSimulationEvent.OnServerEvent:Connect(function(player, scenarioName)
+    print(string.format("[GameManager] Player '%s' requested simulation restart: %s", player.Name, tostring(scenarioName)))
+    -- Run the requested scenario in a separate thread so the handler returns immediately
+    task.spawn(function()
+        local result = runSimulation(scenarioName or Config.SCENARIOS.MERCANTILIST)
+        print("[GameManager] Player-triggered simulation complete.")
+    end)
+end)
+
+-- ─── Auto-run Sequence ────────────────────────────────────────────────────────
+
+-- Run mercantilist scenario
+local mercResult = runSimulation(Config.SCENARIOS.MERCANTILIST)
+
+task.wait(5)
+
+-- Run free trade scenario
+local freeResult = runSimulation(Config.SCENARIOS.FREE_TRADE)
+
+task.wait(2)
+
+-- Compare and fire to clients
+local mercWealth  = mercResult.globalWealth
+local freeWealth  = freeResult.globalWealth
+local percentDiff = 0
+if mercWealth > 0 then
+    percentDiff = math.floor(((freeWealth - mercWealth) / mercWealth) * 100)
+end
+
+print(string.format(
+    "[GameManager] Comparison: Mercantilist total wealth = %sg | Free Trade total wealth = %sg | Difference = %d%%",
+    formatNumber(mercWealth), formatNumber(freeWealth), percentDiff
+))
+
+comparisonEvent:FireAllClients(mercResult, freeResult)
+]]></string>
+      </Properties>
+    </Item>
+    <Item class="Script" referent="8">
+      <Properties>
+        <string name="Name">MapSetup</string>
+        <token name="RunContext">0</token>
+        <string name="Source"><![CDATA[-- MapSetup.server.lua
+-- Server Script: builds the world geometry at game start
+-- Place in ServerScriptService
+
+local RS = game:GetService("ReplicatedStorage")
+local Config = require(RS:WaitForChild("GameConfig"))
+
+-- ─── Helper: create a Part with common defaults ────────────────────────────
+
+local function makePart(props)
+    local part = Instance.new("Part")
+    part.Anchored   = true
+    part.CanCollide = props.CanCollide ~= nil and props.CanCollide or true
+    part.Name       = props.Name or "Part"
+    part.Size       = props.Size or Vector3.new(4, 4, 4)
+    part.CFrame     = props.CFrame or CFrame.new(props.Position or Vector3.new(0, 0, 0))
+    part.Material   = props.Material or Enum.Material.SmoothPlastic
+    part.Color      = props.Color or Color3.fromRGB(200, 200, 200)
+    if props.Transparency then
+        part.Transparency = props.Transparency
+    end
+    part.TopSurface    = Enum.SurfaceType.Smooth
+    part.BottomSurface = Enum.SurfaceType.Smooth
+    return part
+end
+
+-- ─── 1. Ocean ─────────────────────────────────────────────────────────────────
+
+local ocean = makePart({
+    Name       = "Ocean",
+    Size       = Config.OCEAN_SIZE,
+    Position   = Vector3.new(0, 0, 0),
+    Color      = Color3.fromRGB(30, 90, 170),
+    CanCollide = false,
+})
+ocean.Parent = workspace
+
+-- ─── 2. Baseplate ────────────────────────────────────────────────────────────
+
+-- Try to find and reuse the existing Baseplate, otherwise create one
+local baseplate = workspace:FindFirstChild("Baseplate")
+if baseplate and baseplate:IsA("BasePart") then
+    baseplate.Anchored = true
+    baseplate.Size     = Vector3.new(Config.OCEAN_SIZE.X, 4, Config.OCEAN_SIZE.Z)
+    baseplate.CFrame   = CFrame.new(0, -4, 0)
+    baseplate.Material = Enum.Material.SmoothPlastic
+    baseplate.Color    = Color3.fromRGB(100, 70, 50)
+else
+    local bp = makePart({
+        Name     = "Baseplate",
+        Size     = Vector3.new(Config.OCEAN_SIZE.X, 4, Config.OCEAN_SIZE.Z),
+        Position = Vector3.new(0, -4, 0),
+        Color    = Color3.fromRGB(100, 70, 50),
+    })
+    bp.Parent = workspace
+end
+
+-- ─── 3. Islands ──────────────────────────────────────────────────────────────
+
+local islandsFolder = Instance.new("Folder")
+islandsFolder.Name   = "Islands"
+islandsFolder.Parent = workspace
+
+-- Precompute island centers (at water level) for port orientation
+local islandCenters = {}
+for _, nationData in ipairs(Config.NATIONS) do
+    islandCenters[nationData.id] = nationData.position
+end
+
+-- Center of the map (for port orientation)
+local mapCenter = Vector3.new(0, 1, 0)
+
+for _, nationData in ipairs(Config.NATIONS) do
+    local islandModel = Instance.new("Model")
+    islandModel.Name  = nationData.name
+    islandModel.Parent = islandsFolder
+
+    local islandBaseY = nationData.position.Y + Config.ISLAND_SIZE.Y / 2
+
+    -- IslandBase
+    local islandBase = makePart({
+        Name     = "IslandBase",
+        Size     = Config.ISLAND_SIZE,
+        Position = Vector3.new(nationData.position.X, islandBaseY, nationData.position.Z),
+        Color    = Color3.fromRGB(95, 130, 60),
+    })
+    islandBase.Parent = islandModel
+    islandModel.PrimaryPart = islandBase
+
+    -- Sand ring (sits at water level around the island base)
+    local sandRingSize = Config.ISLAND_SIZE + Vector3.new(10, 0, 10)
+    sandRingSize = Vector3.new(sandRingSize.X, 2, sandRingSize.Z)
+    local sandRing = makePart({
+        Name     = "SandRing",
+        Size     = sandRingSize,
+        Position = Vector3.new(nationData.position.X, 1, nationData.position.Z),
+        Color    = Color3.fromRGB(230, 200, 130),
+    })
+    sandRing.Parent = islandModel
+
+    -- Port (dock extending from island toward center)
+    -- Direction from island toward map center
+    local toCenter = (mapCenter - nationData.position)
+    local toCenterXZ = Vector3.new(toCenter.X, 0, toCenter.Z)
+    local portDirection
+    if toCenterXZ.Magnitude > 0.01 then
+        portDirection = toCenterXZ.Unit
+    else
+        portDirection = Vector3.new(0, 0, 1)
+    end
+
+    local portLength = 20
+    local portWidth  = 8
+    local portHeight = 2
+    local portEdgeOffset = Config.ISLAND_SIZE.X / 2
+    local portCenter = Vector3.new(
+        nationData.position.X + portDirection.X * (portEdgeOffset + portLength / 2),
+        2,  -- just above water level
+        nationData.position.Z + portDirection.Z * (portEdgeOffset + portLength / 2)
+    )
+
+    local portCFrame = CFrame.lookAt(portCenter, portCenter + portDirection)
+    local port = makePart({
+        Name   = "Port",
+        Size   = Vector3.new(portWidth, portHeight, portLength),
+        CFrame = portCFrame,
+        Color  = Color3.fromRGB(120, 80, 40),
+    })
+    port.Parent = islandModel
+
+    -- BillboardGui: nation name label
+    local labelPart = makePart({
+        Name     = "LabelAnchor",
+        Size     = Vector3.new(1, 1, 1),
+        Position = Vector3.new(nationData.position.X, islandBaseY + Config.ISLAND_SIZE.Y, nationData.position.Z),
+        Color    = Color3.fromRGB(0, 0, 0),
+        CanCollide = false,
+    })
+    labelPart.Transparency = 1
+    labelPart.Parent = islandModel
+
+    local nameBillboard = Instance.new("BillboardGui")
+    nameBillboard.Name            = "NameLabel"
+    nameBillboard.Size            = UDim2.new(0, 160, 0, 40)
+    nameBillboard.StudsOffset     = Vector3.new(0, 2, 0)
+    nameBillboard.AlwaysOnTop     = true
+    nameBillboard.Parent          = labelPart
+
+    local nameBg = Instance.new("Frame")
+    nameBg.Size              = UDim2.new(1, 0, 1, 0)
+    nameBg.BackgroundColor3  = nationData.color
+    nameBg.BackgroundTransparency = 0.3
+    nameBg.BorderSizePixel   = 0
+    nameBg.Parent            = nameBillboard
+
+    local nameText = Instance.new("TextLabel")
+    nameText.Size              = UDim2.new(1, 0, 1, 0)
+    nameText.BackgroundTransparency = 1
+    nameText.Text              = nationData.name
+    nameText.TextColor3        = Color3.fromRGB(255, 255, 255)
+    nameText.TextScaled        = true
+    nameText.Font              = Enum.Font.GothamBold
+    nameText.Parent            = nameBg
+
+    -- TreasuryLabel BillboardGui
+    local treasuryBillboard = Instance.new("BillboardGui")
+    treasuryBillboard.Name        = "TreasuryLabel"
+    treasuryBillboard.Size        = UDim2.new(0, 160, 0, 30)
+    treasuryBillboard.StudsOffset = Vector3.new(0, -2, 0)
+    treasuryBillboard.AlwaysOnTop = true
+    treasuryBillboard.Parent      = labelPart
+
+    local treasuryBg = Instance.new("Frame")
+    treasuryBg.Size              = UDim2.new(1, 0, 1, 0)
+    treasuryBg.BackgroundColor3  = Color3.fromRGB(20, 20, 20)
+    treasuryBg.BackgroundTransparency = 0.4
+    treasuryBg.BorderSizePixel   = 0
+    treasuryBg.Parent            = treasuryBillboard
+
+    local treasuryText = Instance.new("TextLabel")
+    treasuryText.Name              = "WealthText"
+    treasuryText.Size              = UDim2.new(1, 0, 1, 0)
+    treasuryText.BackgroundTransparency = 1
+    treasuryText.Text              = "Treasury: 1000g"
+    treasuryText.TextColor3        = Color3.fromRGB(255, 220, 50)
+    treasuryText.TextScaled        = true
+    treasuryText.Font              = Enum.Font.Gotham
+    treasuryText.Parent            = treasuryBg
+
+    -- Store nationId in the model for easy lookup
+    local idValue = Instance.new("IntValue")
+    idValue.Name  = "NationId"
+    idValue.Value = nationData.id
+    idValue.Parent = islandModel
+end
+
+-- ─── 4. Ships ────────────────────────────────────────────────────────────────
+
+local shipsFolder = Instance.new("Folder")
+shipsFolder.Name   = "Ships"
+shipsFolder.Parent = workspace
+
+local function darkenColor(color3, factor)
+    factor = factor or 0.6
+    return Color3.new(
+        color3.R * factor,
+        color3.G * factor,
+        color3.B * factor
+    )
+end
+
+for _, nationData in ipairs(Config.NATIONS) do
+    local portEdgeOffset = Config.ISLAND_SIZE.X / 2
+    local toCenter = (mapCenter - nationData.position)
+    local toCenterXZ = Vector3.new(toCenter.X, 0, toCenter.Z)
+    local portDir
+    if toCenterXZ.Magnitude > 0.01 then
+        portDir = toCenterXZ.Unit
+    else
+        portDir = Vector3.new(0, 0, 1)
+    end
+    -- Base spawn position at port
+    local portSpawn = Vector3.new(
+        nationData.position.X + portDir.X * portEdgeOffset,
+        3,
+        nationData.position.Z + portDir.Z * portEdgeOffset
+    )
+
+    -- Create trade ships
+    for i = 1, Config.INITIAL_TRADE_SHIPS do
+        local shipModel = Instance.new("Model")
+        shipModel.Name  = nationData.name .. "_TradeShip_" .. i
+        shipModel.Parent = shipsFolder
+
+        -- Hull
+        local hullSize = Vector3.new(5, 2, 10)
+        local spawnOffset = Vector3.new((i - 1) * 7, 0, 0)
+        local hull = makePart({
+            Name     = "Hull",
+            Size     = hullSize,
+            Position = portSpawn + spawnOffset,
+            Color    = nationData.color,
+        })
+        hull.CanCollide = false
+        hull.Parent = shipModel
+        shipModel.PrimaryPart = hull
+
+        -- Flag
+        local flag = makePart({
+            Name     = "Flag",
+            Size     = Vector3.new(3, 1, 0.3),
+            Position = portSpawn + spawnOffset + Vector3.new(0, 2, -3),
+            Color    = nationData.color,
+        })
+        flag.CanCollide = false
+        flag.Parent = shipModel
+
+        -- Metadata values
+        local nationIdVal = Instance.new("StringValue")
+        nationIdVal.Name  = "NationId"
+        nationIdVal.Value = tostring(nationData.id)
+        nationIdVal.Parent = shipModel
+
+        local shipTypeVal = Instance.new("StringValue")
+        shipTypeVal.Name  = "ShipType"
+        shipTypeVal.Value = "TradeShip"
+        shipTypeVal.Parent = shipModel
+    end
+
+    -- Create warships
+    for i = 1, Config.INITIAL_WARSHIPS do
+        local shipModel = Instance.new("Model")
+        shipModel.Name  = nationData.name .. "_WarShip_" .. i
+        shipModel.Parent = shipsFolder
+
+        local hullSize = Vector3.new(6, 3, 12)
+        local spawnOffset = Vector3.new((i - 1) * 9, 0, Config.INITIAL_TRADE_SHIPS * 7 + 5)
+        local hull = makePart({
+            Name     = "Hull",
+            Size     = hullSize,
+            Position = portSpawn + spawnOffset,
+            Color    = darkenColor(nationData.color, 0.65),
+        })
+        hull.CanCollide = false
+        hull.Parent = shipModel
+        shipModel.PrimaryPart = hull
+
+        -- Flag (darker variant)
+        local flag = makePart({
+            Name     = "Flag",
+            Size     = Vector3.new(3, 1, 0.3),
+            Position = portSpawn + spawnOffset + Vector3.new(0, 3, -4),
+            Color    = nationData.color,
+        })
+        flag.CanCollide = false
+        flag.Parent = shipModel
+
+        -- Metadata values
+        local nationIdVal = Instance.new("StringValue")
+        nationIdVal.Name  = "NationId"
+        nationIdVal.Value = tostring(nationData.id)
+        nationIdVal.Parent = shipModel
+
+        local shipTypeVal = Instance.new("StringValue")
+        shipTypeVal.Name  = "ShipType"
+        shipTypeVal.Value = "WarShip"
+        shipTypeVal.Parent = shipModel
+    end
+end
+
+-- ─── 5. Trade Route Visuals ───────────────────────────────────────────────────
+
+local tradeRoutesFolder = Instance.new("Folder")
+tradeRoutesFolder.Name   = "TradeRouteVisuals"
+tradeRoutesFolder.Parent = workspace
+
+local nations = Config.NATIONS
+for i = 1, #nations do
+    for j = i + 1, #nations do
+        local n1 = nations[i]
+        local n2 = nations[j]
+
+        local p1 = Vector3.new(n1.position.X, 0.5, n1.position.Z)
+        local p2 = Vector3.new(n2.position.X, 0.5, n2.position.Z)
+
+        local midpoint = (p1 + p2) / 2
+        local distance = (p2 - p1).Magnitude
+
+        local routePart = makePart({
+            Name         = n1.name .. "_to_" .. n2.name,
+            Size         = Vector3.new(1, 0.5, distance),
+            CFrame       = CFrame.lookAt(midpoint, p2),
+            Color        = Color3.fromRGB(255, 255, 200),
+            Transparency = 0.7,
+            CanCollide   = false,
+        })
+        routePart.Material = Enum.Material.Neon
+        routePart.Parent   = tradeRoutesFolder
+    end
+end
+
+-- ─── 6. TickComplete BindableEvent ───────────────────────────────────────────
+
+local tickComplete = Instance.new("BindableEvent")
+tickComplete.Name   = "TickComplete"
+tickComplete.Parent = RS
+
+-- ─── Done ────────────────────────────────────────────────────────────────────
+
+print("[MapSetup] World created successfully")
+]]></string>
+      </Properties>
+    </Item>
+  </Item>
+  <Item class="StarterPlayer" referent="9">
+    <Properties>
+      <string name="Name">StarterPlayer</string>
+    </Properties>
+    <Item class="StarterPlayerScripts" referent="10">
+      <Properties>
+        <string name="Name">StarterPlayerScripts</string>
+      </Properties>
+      <Item class="LocalScript" referent="11">
+        <Properties>
+          <string name="Name">SimulationUI</string>
+          <string name="Source"><![CDATA[-- SimulationUI.client.lua
+-- LocalScript: creates and manages the simulation HUD
+-- Place in StarterPlayer/StarterPlayerScripts
+
+local Players     = game:GetService("Players")
+local RS          = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+
+local Config = require(RS:WaitForChild("GameConfig"))
+
+-- Wait for SimEvents folder
+local simEvents       = RS:WaitForChild("SimEvents", 30)
+local wealthUpdated   = simEvents and simEvents:WaitForChild("WealthUpdated", 30)
+local tickLogEvent    = simEvents and simEvents:WaitForChild("TickLog", 30)
+local simEndedEvent   = simEvents and simEvents:WaitForChild("SimulationEnded", 30)
+local comparisonEvent = simEvents and simEvents:WaitForChild("ComparisonReady", 30)
+
+local localPlayer = Players.LocalPlayer
+local playerGui   = localPlayer:WaitForChild("PlayerGui")
+
+-- ─── Color Utilities ──────────────────────────────────────────────────────────
+
+local COLORS = {
+    DARK_BG     = Color3.fromRGB(20, 20, 30),
+    DARK_PANEL  = Color3.fromRGB(15, 15, 25),
+    GOLD        = Color3.fromRGB(255, 215, 0),
+    WHITE       = Color3.fromRGB(255, 255, 255),
+    GREEN       = Color3.fromRGB(80, 220, 80),
+    RED         = Color3.fromRGB(220, 80, 80),
+    ORANGE      = Color3.fromRGB(255, 140, 0),
+    LIGHT_GRAY  = Color3.fromRGB(180, 180, 180),
+    HEADER_BG   = Color3.fromRGB(10, 10, 20),
+}
+
+-- ─── Number Formatting ────────────────────────────────────────────────────────
+
+local function formatGold(n)
+    n = math.floor(n or 0)
+    local s = tostring(math.abs(n))
+    local result = ""
+    local len = #s
+    for i = 1, len do
+        if i > 1 and (len - i + 1) % 3 == 0 then
+            result = result .. ","
+        end
+        result = result .. s:sub(i, i)
+    end
+    if n < 0 then result = "-" .. result end
+    return result .. " g"
+end
+
+local function signedStr(n)
+    n = math.floor(n or 0)
+    if n >= 0 then
+        return "+" .. tostring(n)
+    else
+        return tostring(n)
+    end
+end
+
+-- ─── ScreenGui Setup ──────────────────────────────────────────────────────────
+
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name         = "MercantilismUI"
+screenGui.ResetOnSpawn = false
+screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+screenGui.Parent       = playerGui
+
+-- ─── Helper: create a Frame ───────────────────────────────────────────────────
+
+local function makeFrame(props)
+    local f = Instance.new("Frame")
+    f.Name                  = props.Name or "Frame"
+    f.Size                  = props.Size or UDim2.new(1, 0, 1, 0)
+    f.Position              = props.Position or UDim2.new(0, 0, 0, 0)
+    f.BackgroundColor3      = props.BackgroundColor3 or COLORS.DARK_BG
+    f.BackgroundTransparency = props.BackgroundTransparency or 0
+    f.BorderSizePixel       = 0
+    f.Parent                = props.Parent or screenGui
+    if props.ZIndex then f.ZIndex = props.ZIndex end
+    return f
+end
+
+local function makeLabel(props)
+    local l = Instance.new("TextLabel")
+    l.Name                  = props.Name or "Label"
+    l.Size                  = props.Size or UDim2.new(1, 0, 1, 0)
+    l.Position              = props.Position or UDim2.new(0, 0, 0, 0)
+    l.BackgroundTransparency = 1
+    l.Text                  = props.Text or ""
+    l.TextColor3            = props.TextColor3 or COLORS.WHITE
+    l.Font                  = props.Font or Enum.Font.Gotham
+    l.TextSize              = props.TextSize or 14
+    l.TextXAlignment        = props.TextXAlignment or Enum.TextXAlignment.Center
+    l.TextYAlignment        = props.TextYAlignment or Enum.TextYAlignment.Center
+    l.TextScaled            = props.TextScaled or false
+    l.Parent                = props.Parent or screenGui
+    if props.ZIndex then l.ZIndex = props.ZIndex end
+    return l
+end
+
+-- ─── 1. Header Bar ────────────────────────────────────────────────────────────
+
+local headerBar = makeFrame({
+    Name                  = "HeaderBar",
+    Size                  = UDim2.new(1, 0, 0, 50),
+    Position              = UDim2.new(0, 0, 0, 0),
+    BackgroundColor3      = COLORS.HEADER_BG,
+    BackgroundTransparency = 0.2,
+    Parent                = screenGui,
+})
+
+local headerTitle = makeLabel({
+    Name       = "Title",
+    Size       = UDim2.new(0.7, 0, 1, 0),
+    Position   = UDim2.new(0.15, 0, 0, 0),
+    Text       = "MERCANTILISM SIMULATION",
+    TextColor3 = COLORS.WHITE,
+    Font       = Enum.Font.GothamBold,
+    TextSize   = 20,
+    Parent     = headerBar,
+})
+
+local scenarioLabel = makeLabel({
+    Name             = "ScenarioLabel",
+    Size             = UDim2.new(0.2, -10, 1, 0),
+    Position         = UDim2.new(0.8, 5, 0, 0),
+    Text             = "Waiting...",
+    TextColor3       = COLORS.GOLD,
+    Font             = Enum.Font.GothamBold,
+    TextSize         = 14,
+    TextXAlignment   = Enum.TextXAlignment.Right,
+    Parent           = headerBar,
+})
+
+-- ─── 2. Tick Progress Bar ────────────────────────────────────────────────────
+
+local progressBarBg = makeFrame({
+    Name                  = "ProgressBarBg",
+    Size                  = UDim2.new(1, 0, 0, 6),
+    Position              = UDim2.new(0, 0, 0, 50),
+    BackgroundColor3      = Color3.fromRGB(40, 40, 60),
+    BackgroundTransparency = 0,
+    Parent                = screenGui,
+})
+
+local progressBarFill = makeFrame({
+    Name                  = "ProgressBarFill",
+    Size                  = UDim2.new(0, 0, 1, 0),
+    Position              = UDim2.new(0, 0, 0, 0),
+    BackgroundColor3      = COLORS.GOLD,
+    BackgroundTransparency = 0,
+    Parent                = progressBarBg,
+})
+
+-- ─── 3. Nation Leaderboard Panel (left) ──────────────────────────────────────
+
+local leaderboardPanel = makeFrame({
+    Name                  = "LeaderboardPanel",
+    Size                  = UDim2.new(0, 280, 0, 420),
+    Position              = UDim2.new(0, 10, 0, 66),
+    BackgroundColor3      = COLORS.DARK_PANEL,
+    BackgroundTransparency = 0.15,
+    Parent                = screenGui,
+})
+
+do
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 6)
+    corner.Parent = leaderboardPanel
+end
+
+local leaderboardTitle = makeLabel({
+    Name       = "Title",
+    Size       = UDim2.new(1, 0, 0, 30),
+    Position   = UDim2.new(0, 0, 0, 0),
+    Text       = "NATION TREASURIES",
+    TextColor3 = COLORS.GOLD,
+    Font       = Enum.Font.GothamBold,
+    TextSize   = 14,
+    Parent     = leaderboardPanel,
+})
+
+-- Status label shown before first update
+local waitingLabel = makeLabel({
+    Name       = "WaitingLabel",
+    Size       = UDim2.new(1, 0, 0, 30),
+    Position   = UDim2.new(0, 0, 0, 35),
+    Text       = "Simulation in progress...",
+    TextColor3 = COLORS.LIGHT_GRAY,
+    TextSize   = 12,
+    Parent     = leaderboardPanel,
+})
+
+-- Nation rows (created for each nation)
+local nationRows = {}
+
+local function createNationRows()
+    -- Remove old rows
+    for _, row in ipairs(nationRows) do
+        row.frame:Destroy()
+    end
+    nationRows = {}
+
+    for i, nationData in ipairs(Config.NATIONS) do
+        local rowY = 35 + (i - 1) * 92
+        local rowFrame = makeFrame({
+            Name                  = "NationRow_" .. nationData.id,
+            Size                  = UDim2.new(1, -16, 0, 86),
+            Position              = UDim2.new(0, 8, 0, rowY),
+            BackgroundColor3      = Color3.fromRGB(25, 25, 40),
+            BackgroundTransparency = 0.3,
+            Parent                = leaderboardPanel,
+        })
+        do
+            local corner = Instance.new("UICorner")
+            corner.CornerRadius = UDim.new(0, 4)
+            corner.Parent = rowFrame
+        end
+
+        -- Nation color square
+        local colorSquare = makeFrame({
+            Name                  = "ColorSquare",
+            Size                  = UDim2.new(0, 14, 0, 14),
+            Position              = UDim2.new(0, 8, 0, 8),
+            BackgroundColor3      = nationData.color,
+            BackgroundTransparency = 0,
+            Parent                = rowFrame,
+        })
+        do
+            local corner = Instance.new("UICorner")
+            corner.CornerRadius = UDim.new(0, 3)
+            corner.Parent = colorSquare
+        end
+
+        -- Nation name
+        local nameLabel = makeLabel({
+            Name       = "NationName",
+            Size       = UDim2.new(0.55, 0, 0, 20),
+            Position   = UDim2.new(0, 28, 0, 4),
+            Text       = nationData.name,
+            TextColor3 = COLORS.WHITE,
+            Font       = Enum.Font.GothamBold,
+            TextSize   = 13,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            Parent     = rowFrame,
+        })
+
+        -- Degradation status badge (top-right of row)
+        local statusBadge = makeLabel({
+            Name       = "StatusBadge",
+            Size       = UDim2.new(0.42, 0, 0, 16),
+            Position   = UDim2.new(0.57, 0, 0, 6),
+            Text       = "● HEALTHY",
+            TextColor3 = COLORS.GREEN,
+            Font       = Enum.Font.GothamBold,
+            TextSize   = 10,
+            TextXAlignment = Enum.TextXAlignment.Right,
+            Parent     = rowFrame,
+        })
+
+        -- Wealth label (large, right-aligned)
+        local wealthLabel = makeLabel({
+            Name       = "WealthLabel",
+            Size       = UDim2.new(1, -12, 0, 22),
+            Position   = UDim2.new(0, 6, 0, 24),
+            Text       = "1,000 g",
+            TextColor3 = COLORS.GOLD,
+            Font       = Enum.Font.GothamBold,
+            TextSize   = 16,
+            TextXAlignment = Enum.TextXAlignment.Right,
+            Parent     = rowFrame,
+        })
+
+        -- Trade balance label
+        local balanceLabel = makeLabel({
+            Name       = "BalanceLabel",
+            Size       = UDim2.new(0.5, -6, 0, 18),
+            Position   = UDim2.new(0, 6, 0, 48),
+            Text       = "Balance: +0",
+            TextColor3 = COLORS.LIGHT_GRAY,
+            Font       = Enum.Font.Gotham,
+            TextSize   = 11,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            Parent     = rowFrame,
+        })
+
+        -- Navy cost label
+        local navyLabel = makeLabel({
+            Name       = "NavyLabel",
+            Size       = UDim2.new(0.5, -6, 0, 18),
+            Position   = UDim2.new(0.5, 0, 0, 48),
+            Text       = "Navy: 20g",
+            TextColor3 = COLORS.LIGHT_GRAY,
+            Font       = Enum.Font.Gotham,
+            TextSize   = 11,
+            TextXAlignment = Enum.TextXAlignment.Right,
+            Parent     = rowFrame,
+        })
+
+        -- Warships label
+        local warshipsLabel = makeLabel({
+            Name       = "WarshipsLabel",
+            Size       = UDim2.new(1, -12, 0, 14),
+            Position   = UDim2.new(0, 6, 0, 68),
+            Text       = "Ships: 2T / 1W",
+            TextColor3 = Color3.fromRGB(150, 150, 170),
+            Font       = Enum.Font.Gotham,
+            TextSize   = 10,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            Parent     = rowFrame,
+        })
+
+        table.insert(nationRows, {
+            nationId      = nationData.id,
+            frame         = rowFrame,
+            wealthLabel   = wealthLabel,
+            balanceLabel  = balanceLabel,
+            navyLabel     = navyLabel,
+            warshipsLabel = warshipsLabel,
+            statusBadge   = statusBadge,
+        })
+    end
+end
+
+createNationRows()
+
+-- ─── 4. Global Wealth Tracker (bottom center) ────────────────────────────────
+
+local globalWealthFrame = makeFrame({
+    Name                  = "GlobalWealthFrame",
+    Size                  = UDim2.new(0, 400, 0, 80),
+    Position              = UDim2.new(0.5, -200, 1, -90),
+    BackgroundColor3      = COLORS.DARK_PANEL,
+    BackgroundTransparency = 0.2,
+    Parent                = screenGui,
+})
+do
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 8)
+    corner.Parent = globalWealthFrame
+end
+
+local globalWealthLabel = makeLabel({
+    Name       = "GlobalWealthLabel",
+    Size       = UDim2.new(1, 0, 0.6, 0),
+    Position   = UDim2.new(0, 0, 0, 0),
+    Text       = "GLOBAL WEALTH: 4,000 g",
+    TextColor3 = COLORS.GOLD,
+    Font       = Enum.Font.GothamBold,
+    TextSize   = 20,
+    Parent     = globalWealthFrame,
+})
+
+local tickLabel = makeLabel({
+    Name       = "TickLabel",
+    Size       = UDim2.new(1, 0, 0.4, 0),
+    Position   = UDim2.new(0, 0, 0.6, 0),
+    Text       = "Tick 0 / 24",
+    TextColor3 = COLORS.LIGHT_GRAY,
+    Font       = Enum.Font.Gotham,
+    TextSize   = 14,
+    Parent     = globalWealthFrame,
+})
+
+-- ─── 5. Event Log (right side, scrolling) ────────────────────────────────────
+
+local logPanel = makeFrame({
+    Name                  = "LogPanel",
+    Size                  = UDim2.new(0, 280, 0, 340),
+    Position              = UDim2.new(1, -290, 0, 66),
+    BackgroundColor3      = COLORS.DARK_PANEL,
+    BackgroundTransparency = 0.15,
+    Parent                = screenGui,
+})
+do
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 6)
+    corner.Parent = logPanel
+end
+
+local logTitle = makeLabel({
+    Name       = "LogTitle",
+    Size       = UDim2.new(1, 0, 0, 28),
+    Position   = UDim2.new(0, 0, 0, 0),
+    Text       = "TRADE LOG",
+    TextColor3 = COLORS.GOLD,
+    Font       = Enum.Font.GothamBold,
+    TextSize   = 13,
+    Parent     = logPanel,
+})
+
+local scrollFrame = Instance.new("ScrollingFrame")
+scrollFrame.Name              = "LogScroll"
+scrollFrame.Size              = UDim2.new(1, -4, 1, -32)
+scrollFrame.Position          = UDim2.new(0, 2, 0, 30)
+scrollFrame.BackgroundTransparency = 1
+scrollFrame.ScrollBarThickness = 4
+scrollFrame.ScrollBarImageColor3 = COLORS.GOLD
+scrollFrame.CanvasSize        = UDim2.new(0, 0, 0, 0)
+scrollFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
+scrollFrame.Parent            = logPanel
+
+local logListLayout = Instance.new("UIListLayout")
+logListLayout.SortOrder       = Enum.SortOrder.LayoutOrder
+logListLayout.FillDirection   = Enum.FillDirection.Vertical
+logListLayout.VerticalAlignment = Enum.VerticalAlignment.Top
+logListLayout.Padding         = UDim.new(0, 2)
+logListLayout.Parent          = scrollFrame
+
+local logEntries = {}  -- stores label references (newest first displayed)
+local MAX_LOG_ENTRIES = 15
+
+local function getLogColor(message)
+    local lower = message:lower()
+    if lower:find("bankrupt") then
+        return Color3.fromRGB(220, 60, 60)
+    elseif lower:find("%[decay%]") or lower:find("abandon") or lower:find("disrepair") or lower:find("desert") then
+        return Color3.fromRGB(200, 120, 40)
+    elseif lower:find("plunder") or lower:find("raid") or lower:find("intercept") then
+        return COLORS.ORANGE
+    elseif lower:find("tariff") or lower:find("retaliat") then
+        return COLORS.RED
+    elseif lower:find("exports") or lower:find("income") or lower:find("treasury") then
+        return COLORS.GREEN
+    else
+        return COLORS.LIGHT_GRAY
+    end
+end
+
+local function addLogEntry(message)
+    -- Trim message for display
+    local displayText = message
+    if #displayText > 80 then
+        displayText = displayText:sub(1, 77) .. "..."
+    end
+
+    local entryLabel = Instance.new("TextLabel")
+    entryLabel.Name                  = "LogEntry"
+    entryLabel.Size                  = UDim2.new(1, -8, 0, 0)
+    entryLabel.AutomaticSize         = Enum.AutomaticSize.Y
+    entryLabel.BackgroundTransparency = 1
+    entryLabel.Text                  = displayText
+    entryLabel.TextColor3            = getLogColor(message)
+    entryLabel.Font                  = Enum.Font.Gotham
+    entryLabel.TextSize              = 10
+    entryLabel.TextWrapped           = true
+    entryLabel.TextXAlignment        = Enum.TextXAlignment.Left
+    entryLabel.TextYAlignment        = Enum.TextYAlignment.Top
+    entryLabel.LayoutOrder           = 0
+    entryLabel.Parent                = scrollFrame
+
+    -- Shift all existing entries down in layout order
+    for _, entry in ipairs(logEntries) do
+        entry.LayoutOrder = entry.LayoutOrder + 1
+    end
+
+    table.insert(logEntries, 1, entryLabel)
+
+    -- Remove old entries beyond limit
+    while #logEntries > MAX_LOG_ENTRIES do
+        local old = table.remove(logEntries)
+        old:Destroy()
+    end
+
+    -- Scroll to top
+    scrollFrame.CanvasPosition = Vector2.new(0, 0)
+end
+
+-- ─── State for scenario comparison ───────────────────────────────────────────
+
+local scenarioResults = {}  -- keyed by scenario string
+
+-- ─── 6. Scenario Comparison Panel (initially hidden) ─────────────────────────
+
+local comparisonPanel = makeFrame({
+    Name                  = "ComparisonPanel",
+    Size                  = UDim2.new(0, 600, 0, 340),
+    Position              = UDim2.new(0.5, -300, 0.5, -170),
+    BackgroundColor3      = COLORS.DARK_PANEL,
+    BackgroundTransparency = 0.05,
+    Parent                = screenGui,
+    ZIndex                = 10,
+})
+comparisonPanel.Visible = false
+do
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 10)
+    corner.Parent = comparisonPanel
+end
+
+local compTitle = makeLabel({
+    Name       = "CompTitle",
+    Size       = UDim2.new(1, 0, 0, 40),
+    Position   = UDim2.new(0, 0, 0, 0),
+    Text       = "SCENARIO COMPARISON",
+    TextColor3 = COLORS.GOLD,
+    Font       = Enum.Font.GothamBold,
+    TextSize   = 22,
+    ZIndex     = 11,
+    Parent     = comparisonPanel,
+})
+
+-- Column headers
+local mercHeader = makeLabel({
+    Name       = "MercHeader",
+    Size       = UDim2.new(0.45, 0, 0, 30),
+    Position   = UDim2.new(0.05, 0, 0, 42),
+    Text       = "MERCANTILIST",
+    TextColor3 = COLORS.RED,
+    Font       = Enum.Font.GothamBold,
+    TextSize   = 15,
+    ZIndex     = 11,
+    Parent     = comparisonPanel,
+})
+
+local freeHeader = makeLabel({
+    Name       = "FreeHeader",
+    Size       = UDim2.new(0.45, 0, 0, 30),
+    Position   = UDim2.new(0.5, 0, 0, 42),
+    Text       = "FREE TRADE",
+    TextColor3 = COLORS.GREEN,
+    Font       = Enum.Font.GothamBold,
+    TextSize   = 15,
+    ZIndex     = 11,
+    Parent     = comparisonPanel,
+})
+
+-- Divider line
+local divider = makeFrame({
+    Name                  = "Divider",
+    Size                  = UDim2.new(0, 2, 0, 200),
+    Position              = UDim2.new(0.5, -1, 0, 70),
+    BackgroundColor3      = Color3.fromRGB(60, 60, 80),
+    BackgroundTransparency = 0,
+    ZIndex                = 11,
+    Parent                = comparisonPanel,
+})
+
+-- Mercantilist column content
+local mercGlobalLabel = makeLabel({
+    Name       = "MercGlobalLabel",
+    Size       = UDim2.new(0.45, 0, 0, 22),
+    Position   = UDim2.new(0.05, 0, 0, 76),
+    Text       = "Global Wealth: —",
+    TextColor3 = COLORS.LIGHT_GRAY,
+    Font       = Enum.Font.Gotham,
+    TextSize   = 12,
+    ZIndex     = 11,
+    Parent     = comparisonPanel,
+})
+
+local mercWinnerLabel = makeLabel({
+    Name       = "MercWinnerLabel",
+    Size       = UDim2.new(0.45, 0, 0, 22),
+    Position   = UDim2.new(0.05, 0, 0, 100),
+    Text       = "Winner: —",
+    TextColor3 = COLORS.LIGHT_GRAY,
+    Font       = Enum.Font.Gotham,
+    TextSize   = 12,
+    ZIndex     = 11,
+    Parent     = comparisonPanel,
+})
+
+local mercNationsLabel = makeLabel({
+    Name       = "MercNationsLabel",
+    Size       = UDim2.new(0.45, 0, 0, 100),
+    Position   = UDim2.new(0.05, 0, 0, 124),
+    Text       = "",
+    TextColor3 = COLORS.LIGHT_GRAY,
+    Font       = Enum.Font.Gotham,
+    TextSize   = 11,
+    TextYAlignment = Enum.TextYAlignment.Top,
+    ZIndex     = 11,
+    Parent     = comparisonPanel,
+})
+
+-- Free trade column content
+local freeGlobalLabel = makeLabel({
+    Name       = "FreeGlobalLabel",
+    Size       = UDim2.new(0.45, 0, 0, 22),
+    Position   = UDim2.new(0.5, 5, 0, 76),
+    Text       = "Global Wealth: —",
+    TextColor3 = COLORS.LIGHT_GRAY,
+    Font       = Enum.Font.Gotham,
+    TextSize   = 12,
+    ZIndex     = 11,
+    Parent     = comparisonPanel,
+})
+
+local freeWinnerLabel = makeLabel({
+    Name       = "FreeWinnerLabel",
+    Size       = UDim2.new(0.45, 0, 0, 22),
+    Position   = UDim2.new(0.5, 5, 0, 100),
+    Text       = "Winner: —",
+    TextColor3 = COLORS.LIGHT_GRAY,
+    Font       = Enum.Font.Gotham,
+    TextSize   = 12,
+    ZIndex     = 11,
+    Parent     = comparisonPanel,
+})
+
+local freeNationsLabel = makeLabel({
+    Name       = "FreeNationsLabel",
+    Size       = UDim2.new(0.45, 0, 0, 100),
+    Position   = UDim2.new(0.5, 5, 0, 124),
+    Text       = "",
+    TextColor3 = COLORS.LIGHT_GRAY,
+    Font       = Enum.Font.Gotham,
+    TextSize   = 11,
+    TextYAlignment = Enum.TextYAlignment.Top,
+    ZIndex     = 11,
+    Parent     = comparisonPanel,
+})
+
+-- Conclusion text
+local conclusionLabel = makeLabel({
+    Name       = "ConclusionLabel",
+    Size       = UDim2.new(0.9, 0, 0, 36),
+    Position   = UDim2.new(0.05, 0, 0, 265),
+    Text       = "",
+    TextColor3 = COLORS.GOLD,
+    Font       = Enum.Font.GothamBold,
+    TextSize   = 14,
+    TextWrapped = true,
+    ZIndex     = 11,
+    Parent     = comparisonPanel,
+})
+
+-- Close button
+local closeBtn = Instance.new("TextButton")
+closeBtn.Name                  = "CloseBtn"
+closeBtn.Size                  = UDim2.new(0, 100, 0, 30)
+closeBtn.Position              = UDim2.new(0.5, -50, 1, -40)
+closeBtn.BackgroundColor3      = Color3.fromRGB(80, 30, 30)
+closeBtn.BorderSizePixel       = 0
+closeBtn.Text                  = "Close"
+closeBtn.TextColor3            = COLORS.WHITE
+closeBtn.Font                  = Enum.Font.GothamBold
+closeBtn.TextSize              = 13
+closeBtn.ZIndex                = 12
+closeBtn.Parent                = comparisonPanel
+do
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 5)
+    corner.Parent = closeBtn
+end
+
+closeBtn.MouseButton1Click:Connect(function()
+    comparisonPanel.Visible = false
+end)
+
+-- Function to populate and show comparison panel
+local function showComparison(mercData, freeData)
+    local mercWealth = mercData and mercData.globalWealth or 0
+    local freeWealth = freeData and freeData.globalWealth or 0
+
+    mercGlobalLabel.Text = "Global Wealth: " .. formatGold(mercWealth)
+    mercWinnerLabel.Text = "Winner: " .. (mercData and mercData.winnerName or "—")
+
+    freeGlobalLabel.Text = "Global Wealth: " .. formatGold(freeWealth)
+    freeWinnerLabel.Text = "Winner: " .. (freeData and freeData.winnerName or "—")
+
+    -- Nation breakdowns
+    if mercData and mercData.nations then
+        local lines = {}
+        for _, n in ipairs(mercData.nations) do
+            table.insert(lines, n.name .. ": " .. formatGold(n.wealth))
+        end
+        mercNationsLabel.Text = table.concat(lines, "\n")
+    end
+
+    if freeData and freeData.nations then
+        local lines = {}
+        for _, n in ipairs(freeData.nations) do
+            table.insert(lines, n.name .. ": " .. formatGold(n.wealth))
+        end
+        freeNationsLabel.Text = table.concat(lines, "\n")
+    end
+
+    -- Conclusion
+    if mercWealth > 0 then
+        local pct = math.floor(((freeWealth - mercWealth) / mercWealth) * 100)
+        if pct > 0 then
+            conclusionLabel.Text = string.format(
+                "Free trade generated %d%% more total wealth than mercantilism.", pct
+            )
+            conclusionLabel.TextColor3 = COLORS.GREEN
+        elseif pct < 0 then
+            conclusionLabel.Text = string.format(
+                "Mercantilism generated %d%% more total wealth than free trade.", math.abs(pct)
+            )
+            conclusionLabel.TextColor3 = COLORS.RED
+        else
+            conclusionLabel.Text = "Both scenarios generated equal total wealth."
+            conclusionLabel.TextColor3 = COLORS.GOLD
+        end
+    end
+
+    comparisonPanel.Visible = true
+end
+
+-- ─── Update Functions ─────────────────────────────────────────────────────────
+
+local firstUpdateReceived = false
+
+local function updateLeaderboard(summary)
+    if not summary or not summary.nations then return end
+
+    if not firstUpdateReceived then
+        firstUpdateReceived = true
+        waitingLabel.Visible = false
+    end
+
+    -- Update scenario label
+    local scenarioDisplay = summary.scenario or "—"
+    if scenarioDisplay == Config.SCENARIOS.MERCANTILIST then
+        scenarioDisplay = "Mercantilist"
+        scenarioLabel.TextColor3 = COLORS.RED
+    elseif scenarioDisplay == Config.SCENARIOS.FREE_TRADE then
+        scenarioDisplay = "Free Trade"
+        scenarioLabel.TextColor3 = COLORS.GREEN
+    end
+    scenarioLabel.Text = scenarioDisplay
+
+    -- Update tick progress bar
+    local tick = summary.tick or 0
+    local progress = tick / Config.MAX_TICKS
+    progressBarFill:TweenSize(
+        UDim2.new(progress, 0, 1, 0),
+        Enum.EasingDirection.Out,
+        Enum.EasingStyle.Linear,
+        0.5,
+        true
+    )
+
+    -- Find richest nation for progress bar color
+    local richestColor = COLORS.GOLD
+    local richestWealth = 0
+    local nationDataById = {}
+    for _, nationData in ipairs(Config.NATIONS) do
+        nationDataById[nationData.id] = nationData
+    end
+    for _, nationSummary in ipairs(summary.nations) do
+        if nationSummary.wealth > richestWealth then
+            richestWealth = nationSummary.wealth
+            local nd = nationDataById[nationSummary.id]
+            if nd then
+                richestColor = nd.color
+            end
+        end
+    end
+    progressBarFill.BackgroundColor3 = richestColor
+
+    -- Update global wealth and tick label
+    globalWealthLabel.Text = "GLOBAL WEALTH: " .. formatGold(summary.globalWealth)
+    tickLabel.Text = string.format("Tick %d / %d", tick, Config.MAX_TICKS)
+
+    -- Update nation rows
+    local nationSummaryById = {}
+    for _, ns in ipairs(summary.nations) do
+        nationSummaryById[ns.id] = ns
+    end
+
+    for _, row in ipairs(nationRows) do
+        local ns = nationSummaryById[row.nationId]
+        if ns then
+            row.wealthLabel.Text  = formatGold(ns.wealth)
+            row.navyLabel.Text    = "Navy: " .. math.floor(ns.navyCost) .. "g"
+
+            local balance = ns.tradeBalance or 0
+            row.balanceLabel.Text = "TB: " .. signedStr(balance)
+            if balance >= 0 then
+                row.balanceLabel.TextColor3 = COLORS.GREEN
+            else
+                row.balanceLabel.TextColor3 = COLORS.RED
+            end
+
+            row.warshipsLabel.Text = string.format(
+                "Ships: %dT / %dW | Tariffs: %d",
+                ns.tradeShips or 0,
+                ns.warships or 0,
+                ns.activeTariffs and #ns.activeTariffs or 0
+            )
+
+            -- Degradation status badge
+            if row.statusBadge then
+                local level = ns.degradationLevel or "healthy"
+                if level == "healthy" then
+                    row.statusBadge.Text       = "● HEALTHY"
+                    row.statusBadge.TextColor3 = COLORS.GREEN
+                elseif level == "struggling" then
+                    row.statusBadge.Text       = "⚠ STRUGGLING"
+                    row.statusBadge.TextColor3 = Color3.fromRGB(255, 200, 0)
+                elseif level == "critical" then
+                    row.statusBadge.Text       = "✦ CRITICAL"
+                    row.statusBadge.TextColor3 = COLORS.ORANGE
+                else -- bankrupt
+                    row.statusBadge.Text       = "✗ BANKRUPT"
+                    row.statusBadge.TextColor3 = COLORS.RED
+                end
+            end
+        end
+    end
+end
+
+-- ─── Remote Event Connections ─────────────────────────────────────────────────
+
+if wealthUpdated then
+    wealthUpdated.OnClientEvent:Connect(function(summary)
+        updateLeaderboard(summary)
+    end)
+end
+
+if tickLogEvent then
+    tickLogEvent.OnClientEvent:Connect(function(logString)
+        if logString and logString ~= "" then
+            -- Split by newline and add each as a separate entry (most interesting ones first)
+            local lines = logString:split("\n")
+            -- Add in reverse so newest-looking entries appear at top
+            for i = #lines, 1, -1 do
+                local line = lines[i]
+                if line and line ~= "" then
+                    addLogEntry(line)
+                end
+            end
+        end
+    end)
+end
+
+if simEndedEvent then
+    simEndedEvent.OnClientEvent:Connect(function(results)
+        if results and results.scenario then
+            scenarioResults[results.scenario] = results
+            addLogEntry(string.format(
+                "[SIM END] %s complete! Global: %s | Winner: %s",
+                results.scenario,
+                formatGold(results.globalWealth),
+                results.winnerName or "?"
+            ))
+        end
+    end)
+end
+
+if comparisonEvent then
+    comparisonEvent.OnClientEvent:Connect(function(mercData, freeData)
+        if mercData then scenarioResults[Config.SCENARIOS.MERCANTILIST] = mercData end
+        if freeData then scenarioResults[Config.SCENARIOS.FREE_TRADE]   = freeData end
+        showComparison(
+            scenarioResults[Config.SCENARIOS.MERCANTILIST],
+            scenarioResults[Config.SCENARIOS.FREE_TRADE]
+        )
+    end)
+end
+
+-- ─── Initial state while waiting ─────────────────────────────────────────────
+
+waitingLabel.Text    = "Simulation in progress..."
+waitingLabel.Visible = true
+scenarioLabel.Text   = "Loading..."
+]]></string>
+        </Properties>
+      </Item>
+    </Item>
+  </Item>
+</roblox>

@@ -1,5 +1,207 @@
 # Mercantilism Simulation — Changelog
 
+## v4.1 — Resource-Need-Driven Diplomacy (2026-03-20)
+
+### Summary
+Nations now actively seek to reach minimum resource levels, and resource dependency directly influences diplomatic decisions — alliances, embargoes, and raids.
+
+---
+
+### Resource-Need Relationship Adjustments (GameManager)
+
+Each tick, after production/consumption:
+- Nations **boost relations** (+4) toward suppliers of urgently needed resources (stock < 20)
+- **Extra penalty** (-6) when embargoed by a needed supplier
+- Slight warmth (+1) toward suppliers when stock is below 2× minimum
+- Nations with saturated stocks and no alliance **drift apart** (-1)
+
+After trade:
+- **Extra boost** (+3) when a supplier delivers a resource the buyer urgently needs
+
+### Diplomatic AI Changes (DiplomacySystem)
+
+Resource dependency now shapes all diplomatic decisions:
+
+| Decision | Without Resource Need | With Resource Need |
+|---|---|---|
+| Alliance threshold | 75 relation | **60 relation** (−15) |
+| Embargo declaration | relation ≤ 25 | **Blocked** — won't embargo needed suppliers |
+| Alliance breakdown | relation < 55 | relation < **40** (harder to break) |
+| Embargo lift chance | 30% at relation > 40 | **55%** at relation > **20** |
+
+Log messages now include resource dependency reasons (e.g., "needs Ore!", "desperate for Herbs!").
+
+### New Config Constants
+
+```
+RELATION_NEED_SUPPLIER_BOOST  = 4   -- boost toward needed supplier per tick
+RELATION_NEED_EMBARGO_PENALTY = -6  -- extra penalty when embargoed by supplier
+RELATION_NEED_FULFILLED_BOOST = 3   -- boost when supplier delivers needed resource
+RELATION_NEED_DESPERATE_RAID  = -8  -- penalty toward hoarders
+```
+
+---
+
+## v4.0 — Resource Economy, Relationship-Based Trade & Animations (2026-03-20)
+
+### Summary
+Complete economic overhaul with five major systems:
+1. **Relationship-based interactions** — bilateral relationship scores drive all diplomacy, not internal wealth
+2. **4-resource economy with production tiers** — raw resources, manufactured goods, and technology
+3. **Resource needs & saturation** — nations buy only what they need, visible stock gauges
+4. **Dual-colored boats** — hull = nation color, cargo stripe = resource color
+5. **Combat & weather animations** — explosions on raids, sinking ships in storms
+
+---
+
+### New: Bilateral Relationship System
+
+Every pair of nations has a relationship score (0–100, starting at 50):
+
+| Score Range | Effect |
+|---|---|
+| 75+ | Can form **alliance** (30% trade bonus, tech exports allowed) |
+| 50–75 | Neutral — normal trade |
+| 25–50 | Strained — tariffs more likely, reduced trade |
+| 0–25 | Hostile — can declare **embargo**, raids very likely |
+
+**Relationship changes:**
+| Action | Effect |
+|---|---|
+| Successful trade | +2 per partner per tick |
+| Being allied | +5 per tick |
+| Raid/plunder | **-15** per victim |
+| Sabotage (success) | **-20** |
+| Sabotage (failed) | -10 |
+| Embargo active | -3 per tick |
+| Tariff imposed | -8 |
+| Natural decay | Drifts 1 point toward 50 per tick |
+
+All diplomatic decisions (alliance formation, embargo, privateer commission, sabotage targeting) are now driven by relationship scores rather than just wealth comparisons.
+
+**Config constants:**
+```
+RELATION_INITIAL = 50
+RELATION_ALLIANCE_THRESHOLD = 75
+RELATION_EMBARGO_THRESHOLD = 25
+RELATION_RAID_THRESHOLD = 35
+```
+
+---
+
+### New: 4-Resource Economy
+
+Each nation produces one raw resource and consumes all four:
+
+| Nation | Produces | Color |
+|---|---|---|
+| Ironhaven | **Ore** | Steel-grey |
+| Goldspire | **Herbs** | Green |
+| Emberveil | **Meat** | Red |
+| Drifthollow | **Logs** | Brown |
+
+**Production & consumption per tick:**
+- Own resource: +15 units produced
+- All 4 resources: -8 units consumed
+- Starting stock: 40 each (own resource starts at 70)
+
+**Trade mechanics:**
+- Nations only buy resources they **actually need** (stock < 100)
+- **Urgent need** (stock < 20): pays 50% premium price
+- **Saturated** (stock ≥ 100): won't buy — other countries' exports are blocked
+- Trade ships carry `RESOURCE_TRADE_AMOUNT` (12) units per route
+
+---
+
+### New: Economy Tiers (Progression System)
+
+Nations progress through 3 economy tiers based on wealth:
+
+| Tier | Threshold | Unlocks | Price Multiplier |
+|---|---|---|---|
+| **RAW** | Start | Raw resource exports | 1.0x |
+| **MANUFACTURE** | 1,400g | Manufactured goods (from raw materials) | **2.2x** |
+| **TECHNOLOGY** | 2,200g (very hard) | Technology exports (**alliance-only**) | **4.0x** |
+
+- Manufactured goods are sold to any partner whose economy tier is lower
+- Technology can only be exported within an **alliance** — creating a strong incentive to maintain good relations
+- Tier is displayed on each nation card as RAW / MFG / TECH badge
+
+---
+
+### New: Dual-Colored Boats
+
+Trade ships now have two colors:
+1. **Hull** — nation's color (identity)
+2. **Cargo stripes + hold crate** — resource color (what they're carrying)
+
+Resource colors:
+| Resource | Color |
+|---|---|
+| Meat | Red `(180, 40, 40)` |
+| Logs | Brown `(120, 80, 30)` |
+| Ore | Steel-grey `(100, 110, 130)` |
+| Herbs | Green `(50, 160, 60)` |
+| Manufactured Goods | Gold `(200, 170, 60)` |
+| Technology | Cyan `(80, 180, 255)` |
+
+Cargo stripe color updates dynamically as ships carry different goods between nations.
+
+---
+
+### New: Raid Explosion Animation
+
+When a warship successfully plunders, an explosion plays at the midpoint between attacker and victim:
+- **Main blast**: orange-red neon sphere, expanding from 4→14 studs over 1.5s
+- **6 shrapnel pieces**: fly outward from center, shrinking and fading
+- **Smoke ring**: dark sphere expands to 24 studs and fades
+- All particles destroyed after animation completes
+
+---
+
+### New: Storm Sinking Animation
+
+When a storm sinks a trade ship:
+- Ship **tilts 25°** and sinks **12 studs below water** over 3 seconds (accelerating)
+- All ship parts become **transparent** as it submerges
+- **4 water splash particles** rise from the surface, expanding and fading
+- Ship model moved off-screen after animation; transparency reset for potential reuse
+
+---
+
+### Modified: UI — Resource Gauges & Economy Display
+
+Nation cards expanded from 155×62px to **185×105px** to accommodate:
+- **Economy tier badge** (top-right): RAW (grey) / MFG (gold) / TECH (cyan)
+- **4 resource bars** with:
+  - Color-coded fill bars (resource color, red when urgent, green when full)
+  - Red minimum-need marker line at 20/100
+  - Numeric stock value beside each bar
+- **Relationship scores** shown in diplo dots (e.g., `· Iro 65`)
+  - Green tint when relations > 70
+  - Red tint when relations < 30
+
+Log panel repositioned to avoid overlap with taller nation cards.
+
+---
+
+### Modified Files
+
+| File | Changes |
+|---|---|
+| `GameConfig.lua` | Resource types, colors, economy tiers, saturation thresholds, relationship constants |
+| `NationState.lua` | Resource inventories, economy tier tracking, bilateral relationship system, production/consumption |
+| `TradeSystem.lua` | Resource-based trade, saturation checks, relationship-modified pricing, tier-based goods |
+| `DiplomacySystem.lua` | Relationship-driven alliance/embargo/sabotage/privateer decisions |
+| `NavalSystem.lua` | Unchanged |
+| `DegradationSystem.lua` | Unchanged |
+| `DataCollector.lua` | Added `economy_tier` column to tick CSV |
+| `MapSetup.server.lua` | Dual-color trade ships (cargo stripes + hold), resource color parameter |
+| `GameManager.server.lua` | Explosion/sinking animations, resource production/consumption loop, relationship updates |
+| `SimulationUI.client.lua` | Resource bars, economy tier badges, relationship scores, taller nation cards |
+
+---
+
 ## v3.0 — Mystical Nations & Dynamic Events (2026-03-16)
 
 ### Summary

@@ -1,5 +1,5 @@
 -- TradeSystem.lua
--- ModuleScript: pure trade calculations
+-- ModuleScript: relationship-based trade with resource buying/selling
 -- Place in ReplicatedStorage
 
 local RS                = game:GetService("ReplicatedStorage")
@@ -8,40 +8,40 @@ local DegradationSystem = require(RS:WaitForChild("DegradationSystem"))
 
 local TradeSystem = {}
 
--- ─── Resource Demand Matrix ───────────────────────────────────────────────────
--- resourceDemand[resource] = { list of resources that demand it }
--- Equivalently: which producing nations want each resource?
---   Iron   ← demanded by nations producing Grain, Wood
---   Grain  ← demanded by nations producing Spices, Iron
---   Spices ← demanded by nations producing Wood, Grain
---   Wood   ← demanded by nations producing Iron, Spices
+-- ─── Resource Trade: determines what a nation wants to buy ──────────────────
 
--- demandedBy[resource] = set of producer-resources that want it
-local demandedBy = {
-    Iron   = { Grain = true, Wood = true },
-    Grain  = { Spices = true, Iron = true },
-    Spices = { Wood = true, Grain = true },
-    Wood   = { Iron = true, Spices = true },
-}
-
--- Returns true if `buyerResource` (the buyer nation's primary resource)
--- means that buyer nation demands `sellerResource`.
-local function isResourceDemanded(sellerResource, buyerResource)
-    local demanders = demandedBy[sellerResource]
-    if not demanders then return false end
-    return demanders[buyerResource] == true
+-- Returns a list of { resource, urgency } that the buyer needs
+-- Urgency: 2 = urgent (below min), 1 = normal need, 0 = saturated
+local function getBuyingNeeds(nation)
+    local needs = {}
+    for _, res in ipairs(Config.RAW_RESOURCES) do
+        -- Nations don't buy their own primary resource (they produce it)
+        if res ~= nation.resource then
+            local stock = nation.resources[res] or 0
+            if stock < Config.RESOURCE_MIN_NEED then
+                table.insert(needs, { resource = res, urgency = 2 })
+            elseif stock < Config.RESOURCE_MAX_STOCK then
+                table.insert(needs, { resource = res, urgency = 1 })
+            end
+            -- urgency 0 = saturated, not added (won't buy)
+        end
+    end
+    return needs
 end
 
--- ─── Export Calculation ───────────────────────────────────────────────────────
+-- ─── Export Calculation (relationship-based) ────────────────────────────────
 
--- calculateExports(nation, allNations, scenario, getDiploState)
--- getDiploState: optional function(id1, id2) → diplomatic state string
--- Returns: totalExports (number), breakdown (table: nationId → amount)
-function TradeSystem.calculateExports(nation, allNations, scenario, getDiploState)
+-- calculateExports(nation, allNations, scenario, getDiploState, getRelation)
+-- Trade is now driven by:
+--   1. What the buyer needs (resource saturation)
+--   2. The bilateral relationship score
+--   3. Diplomatic state (alliance/embargo)
+--   4. Economy tier (manufactured goods / technology)
+function TradeSystem.calculateExports(nation, allNations, scenario, getDiploState, getRelation)
     local totalExports = 0
     local breakdown = {}
+    local tradeDetails = {} -- for logging what resources were traded
 
-    -- Identify trade partners (all other nations)
     local partners = {}
     for _, other in ipairs(allNations) do
         if other.id ~= nation.id then
@@ -49,40 +49,102 @@ function TradeSystem.calculateExports(nation, allNations, scenario, getDiploStat
         end
     end
 
-    local numRoutes = #partners
-    if numRoutes == 0 then
-        return 0, {}
+    if #partners == 0 then
+        return 0, {}, {}
     end
 
-    -- Free trade applies a global income multiplier
     local freeTradeMultiplier = 1.0
     if scenario == Config.SCENARIOS.FREE_TRADE then
         freeTradeMultiplier = 1 + Config.FREE_TRADE_BONUS
     end
 
+    -- How many ships service each route
+    local shipsPerRoute = nation.tradeShips / #partners
+
     for _, partner in ipairs(partners) do
-        -- Check embargo first: complete trade block (like Navigation Acts — zero traffic allowed)
+        local routeIncome = 0
+        local routeResources = {}
+
+        -- Check embargo
         if getDiploState and getDiploState(nation.id, partner.id) == "embargo" then
             breakdown[partner.id] = 0
-            -- no income from this route at all
         else
-            -- Base income per route, split evenly across trade ships
-            local routeIncome = Config.BASE_EXPORT_INCOME * (nation.tradeShips / numRoutes)
+            -- Get what the partner wants to buy
+            local partnerNeeds = getBuyingNeeds(partner)
 
-            -- Resource bonus if our resource is demanded by the partner
-            if isResourceDemanded(nation.resource, partner.resource) then
-                routeIncome = routeIncome + Config.RESOURCE_BONUS
+            -- Sell raw resources that partner needs
+            for _, need in ipairs(partnerNeeds) do
+                if need.resource == nation.resource then
+                    -- We produce this! Calculate trade value
+                    local basePrice = Config.BASE_EXPORT_INCOME / #partners
+                    local tradeAmount = math.min(
+                        Config.RESOURCE_TRADE_AMOUNT * shipsPerRoute,
+                        nation.resources[need.resource] or 0
+                    )
+
+                    if tradeAmount > 0 then
+                        local price = basePrice * Config.RAW_PRICE
+
+                        -- Urgent need premium
+                        if need.urgency == 2 then
+                            price = price * Config.RESOURCE_URGENT_PREMIUM
+                        end
+
+                        routeIncome = routeIncome + price
+                        table.insert(routeResources, need.resource)
+
+                        -- Transfer resources
+                        nation.resources[need.resource] = math.max(0,
+                            (nation.resources[need.resource] or 0) - tradeAmount)
+                        partner.resources[need.resource] = math.min(
+                            Config.RESOURCE_MAX_STOCK,
+                            (partner.resources[need.resource] or 0) + tradeAmount)
+                    end
+                end
             end
 
-            -- Apply free trade multiplier
+            -- Economy tier 2: Manufactured goods (made from raw products, higher value)
+            if nation.economyTier >= Config.ECONOMY_TIER.MANUFACTURE then
+                -- Manufactured goods are always in demand (unless partner also manufactures)
+                local mfgDemand = partner.economyTier < Config.ECONOMY_TIER.MANUFACTURE
+                if mfgDemand then
+                    local mfgPrice = (Config.BASE_EXPORT_INCOME / #partners) * Config.MANUFACTURED_PRICE
+                    routeIncome = routeIncome + mfgPrice * shipsPerRoute
+                    table.insert(routeResources, "ManufacturedGoods")
+                end
+            end
+
+            -- Economy tier 3: Technology (alliance-only export, very high value)
+            if nation.economyTier >= Config.ECONOMY_TIER.TECHNOLOGY then
+                local diploState = getDiploState and getDiploState(nation.id, partner.id) or "neutral"
+                if diploState == "allied" then
+                    local techPrice = (Config.BASE_EXPORT_INCOME / #partners) * Config.TECHNOLOGY_PRICE
+                    routeIncome = routeIncome + techPrice * shipsPerRoute
+                    table.insert(routeResources, "Technology")
+                end
+            end
+
+            -- Relationship modifier: better relations = better trade terms
+            if getRelation then
+                local rel = getRelation(nation.id, partner.id)
+                if rel > Config.RELATION_INITIAL then
+                    local bonus = (rel - Config.RELATION_INITIAL) * Config.RELATION_TRADE_BONUS_RATE
+                    routeIncome = routeIncome * (1 + bonus)
+                elseif rel < Config.RELATION_INITIAL then
+                    local penalty = (Config.RELATION_INITIAL - rel) * Config.RELATION_TRADE_PENALTY_RATE
+                    routeIncome = routeIncome * math.max(0.3, 1 - penalty)
+                end
+            end
+
+            -- Free trade bonus
             routeIncome = routeIncome * freeTradeMultiplier
 
-            -- Alliance bonus: allied nations give preferential market access
+            -- Alliance bonus
             if getDiploState and getDiploState(nation.id, partner.id) == "allied" then
                 routeIncome = routeIncome * (1 + Config.ALLIANCE_TRADE_BONUS)
             end
 
-            -- Tariff reduction: if partner has imposed tariffs on us, reduce income
+            -- Tariff penalty
             if scenario == Config.SCENARIOS.MERCANTILIST then
                 if partner.tariffs and partner.tariffs[nation.id] then
                     routeIncome = routeIncome * (1 - Config.TARIFF_RATE)
@@ -91,12 +153,12 @@ function TradeSystem.calculateExports(nation, allNations, scenario, getDiploStat
 
             routeIncome = math.max(0, routeIncome)
             breakdown[partner.id] = routeIncome
+            tradeDetails[partner.id] = routeResources
             totalExports = totalExports + routeIncome
         end
     end
 
-    -- Apply degradation export penalty (struggling/critical/bankrupt nations earn less
-    -- because their infrastructure is decayed and trading partners lose confidence)
+    -- Apply degradation export penalty
     local penalty = DegradationSystem.getExportPenalty(nation)
     if penalty < 1.0 then
         totalExports = totalExports * penalty
@@ -105,18 +167,15 @@ function TradeSystem.calculateExports(nation, allNations, scenario, getDiploStat
         end
     end
 
-    return totalExports, breakdown
+    return totalExports, breakdown, tradeDetails
 end
 
 -- ─── Import Calculation ───────────────────────────────────────────────────────
 
--- calculateImports(nation, exports, scenario)
--- Returns: import spending (number)
 function TradeSystem.calculateImports(nation, exports, scenario)
     local base = exports * Config.IMPORT_SPEND_RATIO
 
     if scenario == Config.SCENARIOS.MERCANTILIST then
-        -- Count how many tariffs this nation has actively imposed
         local activeTariffCount = 0
         if nation.tariffs then
             for _, active in pairs(nation.tariffs) do
@@ -127,7 +186,6 @@ function TradeSystem.calculateImports(nation, exports, scenario)
         end
 
         if activeTariffCount > 0 then
-            -- Reduce imports proportionally to tariff usage (capped at 80% reduction)
             local reductionFactor = Config.TARIFF_RATE * activeTariffCount * 0.4
             reductionFactor = math.min(reductionFactor, 0.80)
             base = base * (1 - reductionFactor)
@@ -139,36 +197,29 @@ end
 
 -- ─── Tariff Policy AI ────────────────────────────────────────────────────────
 
--- evaluateTariffPolicy(nation, allNations, currentTick, nationState, scenario)
--- AI decision: imposes tariffs if trade balance is negative (mercantilist only,
--- after TARIFF_START_TICK).
 function TradeSystem.evaluateTariffPolicy(nation, allNations, currentTick, nationState, scenario)
-    -- Only act in mercantilist scenario
     if scenario ~= Config.SCENARIOS.MERCANTILIST then
         return
     end
 
-    -- Only act after TARIFF_START_TICK
     if currentTick < Config.TARIFF_START_TICK then
         return
     end
 
-    -- If trade balance is negative, impose tariffs on all partners
+    -- Now tariff decisions are relationship-based too
     if nation.tradeBalance < 0 then
-        print(string.format(
-            "[TradeSystem] %s has negative trade balance (%d g). Imposing tariffs on all partners.",
-            nation.name, math.floor(nation.tradeBalance)
-        ))
-
         for _, other in ipairs(allNations) do
             if other.id ~= nation.id then
-                -- Only set if not already tariffing them
-                if not nationState.hasTariff(nation.id, other.id) then
-                    nationState.setTariff(nation.id, other.id, true)
-                    print(string.format(
-                        "[TradeSystem] %s imposes tariff on %s.",
-                        nation.name, other.name
-                    ))
+                local relation = nationState.getRelation(nation.id, other.id)
+                -- Only tariff nations we have poor relations with
+                if relation < 60 then
+                    if not nationState.hasTariff(nation.id, other.id) then
+                        nationState.setTariff(nation.id, other.id, true)
+                        print(string.format(
+                            "[TradeSystem] %s imposes tariff on %s (relation: %d).",
+                            nation.name, other.name, math.floor(relation)
+                        ))
+                    end
                 end
             end
         end

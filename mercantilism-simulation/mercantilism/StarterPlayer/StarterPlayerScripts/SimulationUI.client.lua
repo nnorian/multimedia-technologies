@@ -1,4 +1,4 @@
--- SimulationUI.client.lua (v3 — compact edge layout)
+-- SimulationUI.client.lua (v4 — resource economy, relationship display)
 -- LocalScript: creates and manages the simulation HUD
 -- Place in StarterPlayer/StarterPlayerScripts
 
@@ -31,6 +31,7 @@ local COLORS = {
     ORANGE      = Color3.fromRGB(255, 140, 0),
     LIGHT_GRAY  = Color3.fromRGB(180, 180, 180),
     HEADER_BG   = Color3.fromRGB(10, 10, 20),
+    CYAN        = Color3.fromRGB(80, 180, 255),
 }
 
 -- ─── Number Formatting ────────────────────────────────────────────────────────
@@ -106,7 +107,7 @@ local function addCorner(parent, radius)
     c.Parent = parent
 end
 
--- ─── Notifications (compact, top-center) ────────────────────────────────────
+-- ─── Notifications ────────────────────────────────────────────────────────────
 
 local notifQueue   = {}
 local notifBusy    = false
@@ -188,8 +189,7 @@ local function queueNotification(text, color)
     processNotifQueue()
 end
 
--- ─── 1. Top-Left Info Badge (title + scenario + tick + global wealth) ────────
--- Small compact badge in the corner, no full-width header
+-- ─── 1. Top-Left Info Badge ─────────────────────────────────────────────────
 
 local infoBadge = makeFrame({
     Name                  = "InfoBadge",
@@ -249,7 +249,6 @@ local globalWealthLabel = makeLabel({
     Parent     = infoBadge,
 })
 
--- Thin progress bar inside the badge (bottom edge)
 local progressBarBg = makeFrame({
     Name                  = "ProgressBarBg",
     Size                  = UDim2.new(1, 0, 0, 3),
@@ -266,11 +265,10 @@ local progressBarFill = makeFrame({
     Parent                = progressBarBg,
 })
 
--- ─── 2. Bottom Nation Strip (4 compact horizontal cards) ────────────────────
--- Sits at the very bottom of the screen, leaving center open
+-- ─── 2. Bottom Nation Strip (4 cards with resource bars) ──────────────────────
 
-local CARD_W = 155
-local CARD_H = 62
+local CARD_W = 185
+local CARD_H = 105
 local CARD_GAP = 6
 local STRIP_W = CARD_W * 4 + CARD_GAP * 3
 
@@ -283,7 +281,14 @@ local nationStrip = makeFrame({
 })
 
 local nationRows = {}
-local waitingLabel -- forward declare
+
+-- Resource bar colors
+local RES_BAR_COLORS = {
+    Meat  = Color3.fromRGB(180, 40, 40),
+    Logs  = Color3.fromRGB(120, 80, 30),
+    Ore   = Color3.fromRGB(100, 110, 130),
+    Herbs = Color3.fromRGB(50, 160, 60),
+}
 
 local function createNationRows()
     for _, row in ipairs(nationRows) do
@@ -313,10 +318,10 @@ local function createNationRows()
         })
         addCorner(accent, 2)
 
-        -- Nation name (compact)
+        -- Nation name
         local nameLabel = makeLabel({
             Name       = "Name",
-            Size       = UDim2.new(0.6, 0, 0, 13),
+            Size       = UDim2.new(0.55, 0, 0, 13),
             Position   = UDim2.new(0, 10, 0, 3),
             Text       = nationData.name,
             TextColor3 = COLORS.WHITE,
@@ -326,11 +331,24 @@ local function createNationRows()
             Parent     = card,
         })
 
-        -- Status badge (top-right)
+        -- Economy tier badge (top-right)
+        local tierBadge = makeLabel({
+            Name       = "Tier",
+            Size       = UDim2.new(0, 40, 0, 13),
+            Position   = UDim2.new(1, -48, 0, 3),
+            Text       = "RAW",
+            TextColor3 = COLORS.LIGHT_GRAY,
+            Font       = Enum.Font.GothamBold,
+            TextSize   = 7,
+            TextXAlignment = Enum.TextXAlignment.Right,
+            Parent     = card,
+        })
+
+        -- Status badge
         local statusBadge = makeLabel({
             Name       = "Status",
-            Size       = UDim2.new(0.38, 0, 0, 13),
-            Position   = UDim2.new(0.62, -2, 0, 3),
+            Size       = UDim2.new(0, 12, 0, 13),
+            Position   = UDim2.new(1, -10, 0, 3),
             Text       = "●",
             TextColor3 = COLORS.GREEN,
             Font       = Enum.Font.GothamBold,
@@ -339,24 +357,24 @@ local function createNationRows()
             Parent     = card,
         })
 
-        -- Wealth (prominent)
+        -- Wealth
         local wealthLabel = makeLabel({
             Name       = "Wealth",
-            Size       = UDim2.new(1, -12, 0, 16),
+            Size       = UDim2.new(1, -12, 0, 14),
             Position   = UDim2.new(0, 10, 0, 16),
             Text       = "1,000g",
             TextColor3 = COLORS.GOLD,
             Font       = Enum.Font.GothamBold,
-            TextSize   = 12,
+            TextSize   = 11,
             TextXAlignment = Enum.TextXAlignment.Left,
             Parent     = card,
         })
 
-        -- Balance + Navy (one line)
+        -- Balance + Navy
         local balanceLabel = makeLabel({
             Name       = "Balance",
-            Size       = UDim2.new(0.5, 0, 0, 12),
-            Position   = UDim2.new(0, 10, 0, 33),
+            Size       = UDim2.new(0.5, 0, 0, 11),
+            Position   = UDim2.new(0, 10, 0, 31),
             Text       = "+0",
             TextColor3 = COLORS.GREEN,
             Font       = Enum.Font.Gotham,
@@ -367,8 +385,8 @@ local function createNationRows()
 
         local navyLabel = makeLabel({
             Name       = "Navy",
-            Size       = UDim2.new(0.5, -10, 0, 12),
-            Position   = UDim2.new(0.5, 0, 0, 33),
+            Size       = UDim2.new(0.5, -10, 0, 11),
+            Position   = UDim2.new(0.5, 0, 0, 31),
             Text       = "1W 2T",
             TextColor3 = COLORS.LIGHT_GRAY,
             Font       = Enum.Font.Gotham,
@@ -377,24 +395,93 @@ local function createNationRows()
             Parent     = card,
         })
 
-        -- Diplo dots (bottom row)
+        -- ── Resource Bars (4 tiny bars showing stock levels) ────────────────
+        local resourceBars = {}
+        local barY = 44
+        for ri, res in ipairs(Config.RAW_RESOURCES) do
+            -- Resource label
+            local resLabel = makeLabel({
+                Name       = "ResLabel_" .. res,
+                Size       = UDim2.new(0, 28, 0, 9),
+                Position   = UDim2.new(0, 10, 0, barY),
+                Text       = res:sub(1, 4),
+                TextColor3 = RES_BAR_COLORS[res] or COLORS.LIGHT_GRAY,
+                Font       = Enum.Font.GothamBold,
+                TextSize   = 6,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                Parent     = card,
+            })
+
+            -- Bar background
+            local barBg = makeFrame({
+                Name                  = "ResBg_" .. res,
+                Size                  = UDim2.new(0, 90, 0, 5),
+                Position              = UDim2.new(0, 40, 0, barY + 2),
+                BackgroundColor3      = Color3.fromRGB(30, 30, 45),
+                Parent                = card,
+            })
+            addCorner(barBg, 2)
+
+            -- Min need marker (thin vertical line)
+            local minMarker = makeFrame({
+                Name                  = "MinMarker_" .. res,
+                Size                  = UDim2.new(0, 1, 1, 2),
+                Position              = UDim2.new(Config.RESOURCE_MIN_NEED / Config.RESOURCE_MAX_STOCK, 0, 0, -1),
+                BackgroundColor3      = COLORS.RED,
+                BackgroundTransparency = 0.3,
+                Parent                = barBg,
+            })
+
+            -- Bar fill
+            local barFill = makeFrame({
+                Name                  = "ResFill_" .. res,
+                Size                  = UDim2.new(0.4, 0, 1, 0),
+                Position              = UDim2.new(0, 0, 0, 0),
+                BackgroundColor3      = RES_BAR_COLORS[res] or COLORS.LIGHT_GRAY,
+                Parent                = barBg,
+            })
+            addCorner(barFill, 2)
+
+            -- Stock number
+            local stockLabel = makeLabel({
+                Name       = "Stock_" .. res,
+                Size       = UDim2.new(0, 30, 0, 9),
+                Position   = UDim2.new(0, 134, 0, barY),
+                Text       = "40",
+                TextColor3 = COLORS.LIGHT_GRAY,
+                Font       = Enum.Font.Gotham,
+                TextSize   = 6,
+                TextXAlignment = Enum.TextXAlignment.Right,
+                Parent     = card,
+            })
+
+            resourceBars[res] = {
+                fill = barFill,
+                stockLabel = stockLabel,
+                resLabel = resLabel,
+            }
+
+            barY = barY + 11
+        end
+
+        -- ── Diplo dots (bottom row) ─────────────────────────────────────────
         local diploDots = {}
         local dotX = 10
         for _, otherData in ipairs(Config.NATIONS) do
             if otherData.id ~= nationData.id then
                 local dot = makeLabel({
                     Name       = "D" .. otherData.id,
-                    Size       = UDim2.new(0, 42, 0, 11),
-                    Position   = UDim2.new(0, dotX, 0, 47),
-                    Text       = "· " .. otherData.name:sub(1,3),
+                    Size       = UDim2.new(0, 52, 0, 10),
+                    Position   = UDim2.new(0, dotX, 0, barY + 1),
+                    Text       = "· " .. otherData.name:sub(1,3) .. " 50",
                     TextColor3 = Color3.fromRGB(90, 90, 110),
                     Font       = Enum.Font.GothamBold,
-                    TextSize   = 7,
+                    TextSize   = 6,
                     TextXAlignment = Enum.TextXAlignment.Left,
                     Parent     = card,
                 })
                 diploDots[otherData.id] = dot
-                dotX = dotX + 44
+                dotX = dotX + 56
             end
         end
 
@@ -405,19 +492,21 @@ local function createNationRows()
             balanceLabel  = balanceLabel,
             navyLabel     = navyLabel,
             statusBadge   = statusBadge,
+            tierBadge     = tierBadge,
             diploDots     = diploDots,
+            resourceBars  = resourceBars,
         })
     end
 end
 
 createNationRows()
 
--- ─── 3. Trade Log (bottom-right, compact) ──────────────────────────────────
+-- ─── 3. Trade Log ─────────────────────────────────────────────────────────────
 
 local logPanel = makeFrame({
     Name                  = "LogPanel",
     Size                  = UDim2.new(0, 220, 0, 180),
-    Position              = UDim2.new(1, -228, 1, -260),
+    Position              = UDim2.new(1, -228, 1, -300),
     BackgroundColor3      = COLORS.DARK_PANEL,
     BackgroundTransparency = 0.3,
     Parent                = screenGui,
@@ -476,6 +565,10 @@ local function getLogColor(message)
         return COLORS.RED
     elseif lower:find("earned") or lower:find("income") then
         return COLORS.GREEN
+    elseif lower:find("%[resource%]") then
+        return COLORS.ORANGE
+    elseif lower:find("tech") or lower:find("mfg") or lower:find("manufacture") then
+        return COLORS.CYAN
     else
         return COLORS.LIGHT_GRAY
     end
@@ -516,7 +609,7 @@ local function addLogEntry(message)
     scrollFrame.CanvasPosition = Vector2.new(0, 0)
 end
 
--- ─── 4. Sparkline (top-right corner, tiny) ─────────────────────────────────
+-- ─── 4. Sparkline ─────────────────────────────────────────────────────────────
 
 local SPARK_COUNT  = 10
 local sparkHistory = {}
@@ -575,7 +668,7 @@ local function updateSparkline(globalWealth)
     end
 end
 
--- ─── 5. Scenario Comparison Panel (popup, only shown at end) ───────────────
+-- ─── 5. Scenario Comparison Panel ─────────────────────────────────────────────
 
 local scenarioResults = {}
 
@@ -796,6 +889,21 @@ local function updateLeaderboard(summary)
 
             row.navyLabel.Text = string.format("%dW %dT", ns.warships or 0, ns.tradeShips or 0)
 
+            -- Economy tier badge
+            if row.tierBadge then
+                local tier = ns.economyTier or 1
+                if tier >= 3 then
+                    row.tierBadge.Text = "TECH"
+                    row.tierBadge.TextColor3 = COLORS.CYAN
+                elseif tier >= 2 then
+                    row.tierBadge.Text = "MFG"
+                    row.tierBadge.TextColor3 = COLORS.GOLD
+                else
+                    row.tierBadge.Text = "RAW"
+                    row.tierBadge.TextColor3 = COLORS.LIGHT_GRAY
+                end
+            end
+
             -- Status badge
             if row.statusBadge then
                 local level = ns.degradationLevel or "healthy"
@@ -814,27 +922,61 @@ local function updateLeaderboard(summary)
                 end
             end
 
-            -- Diplo dots
-            if row.diploDots and ns.diplomaticRelations then
-                for partnerId, state in pairs(ns.diplomaticRelations) do
-                    local dot = row.diploDots[tonumber(partnerId)]
-                    if dot then
-                        local pName = tostring(partnerId)
-                        for _, nd in ipairs(Config.NATIONS) do
-                            if tostring(nd.id) == tostring(partnerId) then
-                                pName = nd.name:sub(1, 3)
-                                break
-                            end
-                        end
-                        if state == "allied" then
-                            dot.Text = "● " .. pName
-                            dot.TextColor3 = COLORS.GREEN
-                        elseif state == "embargo" then
-                            dot.Text = "✗ " .. pName
-                            dot.TextColor3 = COLORS.RED
+            -- Resource bars
+            if row.resourceBars and ns.resources then
+                for _, res in ipairs(Config.RAW_RESOURCES) do
+                    local barData = row.resourceBars[res]
+                    if barData then
+                        local stock = ns.resources[res] or 0
+                        local fraction = math.clamp(stock / Config.RESOURCE_MAX_STOCK, 0, 1)
+                        barData.fill.Size = UDim2.new(fraction, 0, 1, 0)
+                        barData.stockLabel.Text = tostring(math.floor(stock))
+
+                        -- Color the bar based on urgency
+                        if stock < Config.RESOURCE_MIN_NEED then
+                            barData.fill.BackgroundColor3 = COLORS.RED
+                            barData.stockLabel.TextColor3 = COLORS.RED
+                        elseif stock >= Config.RESOURCE_MAX_STOCK * 0.9 then
+                            barData.fill.BackgroundColor3 = Color3.fromRGB(60, 180, 60)
+                            barData.stockLabel.TextColor3 = COLORS.GREEN
                         else
-                            dot.Text = "· " .. pName
-                            dot.TextColor3 = Color3.fromRGB(90, 90, 110)
+                            barData.fill.BackgroundColor3 = RES_BAR_COLORS[res] or COLORS.LIGHT_GRAY
+                            barData.stockLabel.TextColor3 = COLORS.LIGHT_GRAY
+                        end
+                    end
+                end
+            end
+
+            -- Diplo dots with relationship scores
+            if row.diploDots then
+                local relationData = summary.relations and summary.relations[ns.id]
+                local diploRelations = ns.diplomaticRelations
+
+                for _, otherData in ipairs(Config.NATIONS) do
+                    if otherData.id ~= ns.id then
+                        local dot = row.diploDots[otherData.id]
+                        if dot then
+                            local pName = otherData.name:sub(1, 3)
+                            local relScore = relationData and relationData[tostring(otherData.id)] or 50
+                            local state = diploRelations and diploRelations[tostring(otherData.id)] or "neutral"
+
+                            if state == "allied" then
+                                dot.Text = "● " .. pName .. " " .. math.floor(relScore)
+                                dot.TextColor3 = COLORS.GREEN
+                            elseif state == "embargo" then
+                                dot.Text = "✗ " .. pName .. " " .. math.floor(relScore)
+                                dot.TextColor3 = COLORS.RED
+                            else
+                                dot.Text = "· " .. pName .. " " .. math.floor(relScore)
+                                -- Color based on relationship score
+                                if relScore >= 70 then
+                                    dot.TextColor3 = Color3.fromRGB(100, 180, 100)
+                                elseif relScore <= 30 then
+                                    dot.TextColor3 = Color3.fromRGB(180, 100, 100)
+                                else
+                                    dot.TextColor3 = Color3.fromRGB(90, 90, 110)
+                                end
+                            end
                         end
                     end
                 end
@@ -885,6 +1027,8 @@ if tickLogEvent then
                         queueNotification(line:gsub("%[PLUNDER%] ", ""), COLORS.ORANGE)
                     elseif lower:find("%[decay%]") then
                         queueNotification(line:gsub("%[DECAY%] ", ""), Color3.fromRGB(200, 120, 40))
+                    elseif lower:find("%[resource%]") then
+                        queueNotification(line:gsub("%[RESOURCE%] ", ""), COLORS.ORANGE)
                     end
                 end
             end
@@ -916,7 +1060,7 @@ if comparisonEvent then
     end)
 end
 
--- ─── 6. Data Export Panel (full-screen overlay, shown after both sims) ────
+-- ─── 6. Data Export Panel ─────────────────────────────────────────────────────
 
 local dataExportOverlay = makeFrame({
     Name                  = "DataExportOverlay",
@@ -952,10 +1096,9 @@ local dataPanelTitle = makeLabel({
     Parent     = dataPanel,
 })
 
--- Tab buttons
 local DATA_TABS = { "Tick Data", "Events", "Aggregates" }
 local dataTabButtons = {}
-local dataContents = { "", "", "" } -- filled on event
+local dataContents = { "", "", "" }
 local activeDataTab = 1
 
 local tabBar = makeFrame({
@@ -984,7 +1127,6 @@ for i, tabName in ipairs(DATA_TABS) do
     dataTabButtons[i] = tabBtn
 end
 
--- Scrolling text box for CSV data
 local dataScroll = Instance.new("ScrollingFrame")
 dataScroll.Name              = "DataScroll"
 dataScroll.Size              = UDim2.new(1, -16, 1, -100)
@@ -1040,7 +1182,6 @@ for i, btn in ipairs(dataTabButtons) do
     end)
 end
 
--- Close button
 local dataCloseBtn = Instance.new("TextButton")
 dataCloseBtn.Name = "DataCloseBtn"
 dataCloseBtn.Size = UDim2.new(0, 80, 0, 26)
@@ -1059,7 +1200,6 @@ dataCloseBtn.MouseButton1Click:Connect(function()
     dataExportOverlay.Visible = false
 end)
 
--- Handle DataExport event
 if dataExportEvent then
     dataExportEvent.OnClientEvent:Connect(function(tickCSV, eventCSV, aggregates)
         dataContents[1] = tickCSV or ""

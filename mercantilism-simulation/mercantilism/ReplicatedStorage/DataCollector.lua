@@ -51,6 +51,7 @@ function DataCollector.recordTick(tick, nationId, fields)
         alliance_count    = fields.alliance_count or 0,
         embargo_count     = fields.embargo_count or 0,
         privateer_count   = fields.privateer_count or 0,
+        economy_tier      = fields.economy_tier or 1,
     }
     table.insert(_tickRows, row)
 end
@@ -73,7 +74,8 @@ end
 local TICK_COLUMNS = {
     "scenario","tick","nation","wealth","wealth_delta","exports","imports",
     "plunder_gained","plunder_lost","navy_cost","trade_ships","warships",
-    "degradation_level","tariff_count","alliance_count","embargo_count","privateer_count"
+    "degradation_level","tariff_count","alliance_count","embargo_count","privateer_count",
+    "economy_tier"
 }
 
 local EVENT_COLUMNS = {

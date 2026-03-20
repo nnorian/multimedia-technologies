@@ -1,4 +1,4 @@
--- GameManager.server.lua (v3 — data collection for scientific analysis)
+-- GameManager.server.lua (v4 — resource economy, relationship-based trade, animations)
 -- Server Script: main game loop, orchestrates the simulation
 -- Place in ServerScriptService
 
@@ -109,6 +109,191 @@ local function markAnimating(shipModel, active)
     animatingShips[shipModel] = active or nil
 end
 
+-- ─── Explosion Animation (for raids) ─────────────────────────────────────────
+
+local function playExplosion(position)
+    -- Create a burst of fiery spheres at the position
+    local explosionParts = {}
+    local center = position + Vector3.new(0, 3, 0)
+
+    -- Main explosion sphere
+    local mainBlast = Instance.new("Part")
+    mainBlast.Name = "ExplosionMain"
+    mainBlast.Shape = Enum.PartType.Ball
+    mainBlast.Size = Vector3.new(4, 4, 4)
+    mainBlast.Position = center
+    mainBlast.Anchored = true
+    mainBlast.CanCollide = false
+    mainBlast.Color = Color3.fromRGB(255, 120, 20)
+    mainBlast.Material = Enum.Material.Neon
+    mainBlast.Transparency = 0
+    mainBlast.Parent = workspace
+    table.insert(explosionParts, mainBlast)
+
+    -- Shrapnel pieces
+    for i = 1, 6 do
+        local shard = Instance.new("Part")
+        shard.Name = "Shrapnel" .. i
+        shard.Size = Vector3.new(1.5, 1.5, 1.5)
+        shard.Position = center + Vector3.new(
+            (math.random() - 0.5) * 6,
+            math.random() * 4,
+            (math.random() - 0.5) * 6
+        )
+        shard.Anchored = true
+        shard.CanCollide = false
+        shard.Color = i <= 3 and Color3.fromRGB(255, 80, 10) or Color3.fromRGB(255, 200, 50)
+        shard.Material = Enum.Material.Neon
+        shard.Transparency = 0.1
+        shard.Parent = workspace
+        table.insert(explosionParts, shard)
+    end
+
+    -- Smoke ring
+    local smoke = Instance.new("Part")
+    smoke.Name = "ExplosionSmoke"
+    smoke.Shape = Enum.PartType.Ball
+    smoke.Size = Vector3.new(8, 8, 8)
+    smoke.Position = center
+    smoke.Anchored = true
+    smoke.CanCollide = false
+    smoke.Color = Color3.fromRGB(60, 60, 60)
+    smoke.Material = Enum.Material.SmoothPlastic
+    smoke.Transparency = 0.4
+    smoke.Parent = workspace
+    table.insert(explosionParts, smoke)
+
+    -- Animate: expand and fade over 1.5 seconds
+    local elapsed = 0
+    local duration = 1.5
+    local conn
+    conn = RunService.Heartbeat:Connect(function(dt)
+        elapsed = elapsed + dt
+        local t = math.min(elapsed / duration, 1)
+
+        -- Main blast grows and fades
+        mainBlast.Size = Vector3.new(4 + t * 10, 4 + t * 10, 4 + t * 10)
+        mainBlast.Transparency = t
+        mainBlast.Color = Color3.fromRGB(
+            math.floor(255 * (1 - t * 0.5)),
+            math.floor(120 * (1 - t)),
+            math.floor(20 * (1 - t))
+        )
+
+        -- Shrapnel flies outward and fades
+        for _, shard in ipairs(explosionParts) do
+            if shard.Name:find("Shrapnel") then
+                local dir = (shard.Position - center).Unit
+                shard.Position = shard.Position + dir * dt * 15
+                shard.Transparency = t * 0.8
+                shard.Size = Vector3.new(1.5 * (1 - t * 0.5), 1.5 * (1 - t * 0.5), 1.5 * (1 - t * 0.5))
+            end
+        end
+
+        -- Smoke expands slower
+        smoke.Size = Vector3.new(8 + t * 16, 6 + t * 8, 8 + t * 16)
+        smoke.Transparency = 0.4 + t * 0.6
+
+        if t >= 1 then
+            conn:Disconnect()
+            for _, part in ipairs(explosionParts) do
+                part:Destroy()
+            end
+        end
+    end)
+end
+
+-- ─── Sinking Animation (for storms) ──────────────────────────────────────────
+
+local function playSinking(shipModel)
+    if not shipModel or not shipModel.PrimaryPart then return end
+
+    local startPos = shipModel:GetPivot().Position
+    local startCF = shipModel:GetPivot()
+    local elapsed = 0
+    local duration = 3.0
+
+    -- Create water splash particles
+    local splashParts = {}
+    for i = 1, 4 do
+        local splash = Instance.new("Part")
+        splash.Name = "WaterSplash" .. i
+        splash.Shape = Enum.PartType.Ball
+        splash.Size = Vector3.new(2, 1, 2)
+        splash.Position = startPos + Vector3.new(
+            (math.random() - 0.5) * 8, 0.5, (math.random() - 0.5) * 8
+        )
+        splash.Anchored = true
+        splash.CanCollide = false
+        splash.Color = Color3.fromRGB(80, 150, 220)
+        splash.Material = Enum.Material.Neon
+        splash.Transparency = 0.3
+        splash.Parent = workspace
+        table.insert(splashParts, splash)
+    end
+
+    local conn
+    conn = RunService.Heartbeat:Connect(function(dt)
+        elapsed = elapsed + dt
+        local t = math.min(elapsed / duration, 1)
+        local s = t * t -- accelerating descent
+
+        -- Ship sinks down and tilts
+        local sinkY = startPos.Y - s * 12
+        local tiltAngle = s * math.rad(25)
+        local sinkCF = CFrame.new(startPos.X, sinkY, startPos.Z)
+            * CFrame.Angles(tiltAngle, startCF.Rotation.Y, tiltAngle * 0.5)
+        shipModel:PivotTo(sinkCF)
+
+        -- Make ship transparent as it sinks
+        for _, part in ipairs(shipModel:GetDescendants()) do
+            if part:IsA("BasePart") then
+                part.Transparency = math.min(0.9, t * 0.9)
+            end
+        end
+
+        -- Splash particles rise and fade
+        for _, splash in ipairs(splashParts) do
+            splash.Position = splash.Position + Vector3.new(0, dt * 3, 0)
+            splash.Size = splash.Size + Vector3.new(dt * 2, dt, dt * 2)
+            splash.Transparency = 0.3 + t * 0.7
+        end
+
+        if t >= 1 then
+            conn:Disconnect()
+            -- Clean up splashes
+            for _, splash in ipairs(splashParts) do
+                splash:Destroy()
+            end
+            -- Move ship far away (it's "sunk")
+            shipModel:PivotTo(CFrame.new(0, -100, 0))
+            -- Reset transparency for potential reuse
+            for _, part in ipairs(shipModel:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    part.Transparency = 0
+                end
+            end
+        end
+    end)
+end
+
+-- ─── Update Cargo Stripe Colors ──────────────────────────────────────────────
+-- Changes the cargo stripe and hold colors on trade ships to reflect what they're carrying
+
+local function updateShipCargoColor(shipModel, resourceName)
+    if not shipModel then return end
+    local cargoColor = Config.RESOURCE_COLORS[resourceName]
+    if not cargoColor then return end
+
+    local cargoStripeL = shipModel:FindFirstChild("CargoStripeL")
+    local cargoStripeR = shipModel:FindFirstChild("CargoStripeR")
+    local cargoHold = shipModel:FindFirstChild("CargoHold")
+
+    if cargoStripeL then cargoStripeL.Color = cargoColor end
+    if cargoStripeR then cargoStripeR.Color = cargoColor end
+    if cargoHold then cargoHold.Color = cargoColor end
+end
+
 -- ─── Utility: update treasury BillboardGui ────────────────────────────────────
 
 local function updateTreasuryLabels()
@@ -186,6 +371,17 @@ local EVENTS = {
                     "[EVENT] ⛈ GREAT STORM! %s loses a trade ship to the tempest! Ships: %d",
                     nation.name, nation.tradeShips
                 ))
+
+                -- Play sinking animation on the lost ship
+                local shipsFolder = workspace:FindFirstChild("Ships")
+                if shipsFolder then
+                    local shipName = nation.name .. "_TradeShip_" .. (nation.tradeShips + 1)
+                    local shipModel = shipsFolder:FindFirstChild(shipName)
+                    if shipModel then
+                        playSinking(shipModel)
+                    end
+                end
+
                 return 0
             else
                 local dmg = math.min(80, nation.wealth * 0.15)
@@ -264,7 +460,6 @@ local EVENTS = {
     },
 }
 
--- Returns: nation, eventInfo, amount (or nil if no event)
 local function resolveRandomEvents(allNations, logs)
     if math.random() > Config.EVENT_CHANCE_PER_TICK then
         return nil, nil, 0
@@ -357,6 +552,77 @@ local function runSimulation(scenario)
 
         local allNations = NationState.getAllNations()
 
+        -- 1. Update economy tiers for all nations
+        for _, nation in ipairs(allNations) do
+            NationState.updateEconomyTier(nation)
+        end
+
+        -- 2. Produce & consume resources
+        for _, nation in ipairs(allNations) do
+            NationState.produceResources(nation)
+            NationState.consumeResources(nation)
+        end
+
+        -- 2b. Resource needs influence relations
+        -- Nations seek out suppliers of resources they urgently need
+        for _, nation in ipairs(allNations) do
+            for _, res in ipairs(Config.RAW_RESOURCES) do
+                if res ~= nation.resource then
+                    local stock = nation.resources[res] or 0
+
+                    -- Find who produces this resource
+                    local supplier = nil
+                    for _, other in ipairs(allNations) do
+                        if other.resource == res then
+                            supplier = other
+                            break
+                        end
+                    end
+
+                    if supplier then
+                        local diploState = DiplomacySystem.getState(nation.id, supplier.id)
+
+                        if stock < Config.RESOURCE_MIN_NEED then
+                            -- Urgently need this resource — warm up to the supplier
+                            NationState.changeRelation(nation.id, supplier.id,
+                                Config.RELATION_NEED_SUPPLIER_BOOST)
+
+                            table.insert(tickLogs, string.format(
+                                "[RESOURCE] ⚠ %s urgently needs %s from %s! (stock: %d/%d) — seeking trade",
+                                nation.name, res, supplier.name,
+                                math.floor(stock), Config.RESOURCE_MIN_NEED
+                            ))
+
+                            -- If embargoed by the supplier we desperately need, relations tank harder
+                            if diploState == "embargo" then
+                                NationState.changeRelation(nation.id, supplier.id,
+                                    Config.RELATION_NEED_EMBARGO_PENALTY)
+                                table.insert(tickLogs, string.format(
+                                    "[RESOURCE] ✗ %s is embargoed by %s and starving for %s! Relations deteriorating!",
+                                    nation.name, supplier.name, res
+                                ))
+                            end
+
+                        elseif stock < Config.RESOURCE_MIN_NEED * 2 then
+                            -- Moderately low — slight warmth to supplier
+                            NationState.changeRelation(nation.id, supplier.id, 1)
+
+                        elseif stock >= Config.RESOURCE_MAX_STOCK * 0.9 then
+                            -- Saturated — we don't need them as much, no special boost
+                            -- But if supplier is also saturated on our resource and hoarding,
+                            -- it breeds resentment
+                            local supplierStock = supplier.resources[nation.resource] or 0
+                            if supplierStock >= Config.RESOURCE_MAX_STOCK * 0.9
+                                and diploState ~= "allied" then
+                                -- Both saturated, no interdependency = relations drift apart
+                                NationState.changeRelation(nation.id, supplier.id, -1)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
         -- 3. Animate ships (fire-and-forget)
         local shipsFolder = workspace:FindFirstChild("Ships")
         if shipsFolder then
@@ -373,6 +639,10 @@ local function runSimulation(scenario)
                         end
                         if #otherNations > 0 then
                             local targetNation = otherNations[math.random(1, #otherNations)]
+
+                            -- Update cargo color based on what we're exporting
+                            updateShipCargoColor(shipModel, nation.resource)
+
                             local fromPos = shipModel.PrimaryPart.Position
                             local toPos = allIslandPositions[targetNation.id]
                             local distance = (toPos - fromPos).Magnitude
@@ -417,7 +687,7 @@ local function runSimulation(scenario)
             end
         end
 
-        -- 3b. Random market events — record for data collection
+        -- 3b. Random market events
         local eventLogs = {}
         local eventNation, eventInfo, eventAmount = resolveRandomEvents(allNations, eventLogs)
         for _, msg in ipairs(eventLogs) do
@@ -429,17 +699,17 @@ local function runSimulation(scenario)
                 eventInfo.name, eventAmount)
         end
 
-        -- 4. Tariff decisions (AI)
+        -- 4. Tariff decisions (AI) — now relationship-aware
         for _, nation in ipairs(allNations) do
             TradeSystem.evaluateTariffPolicy(nation, allNations, tick, NationState, scenario)
         end
         NationState.tickRetaliationCountdowns()
 
-        -- 4b. Diplomatic decisions — parse logs for structured data
+        -- 4b. Diplomatic decisions — now relationship-driven
         local diplomacyLogs = {}
         if scenario == Config.SCENARIOS.MERCANTILIST then
             for _, nation in ipairs(allNations) do
-                DiplomacySystem.evaluateDiplomacy(nation, allNations, tick, diplomacyLogs)
+                DiplomacySystem.evaluateDiplomacy(nation, allNations, tick, diplomacyLogs, NationState)
             end
             parseDiplomacyLogs(tick, diplomacyLogs)
             for _, msg in ipairs(diplomacyLogs) do
@@ -448,15 +718,16 @@ local function runSimulation(scenario)
             end
         end
 
-        -- 5. Calculate economics for each nation
+        -- 5. Calculate economics with resource-based trade
         local exportResults  = {}
         local importResults  = {}
         local navyCostResults = {}
 
         for _, nation in ipairs(allNations) do
-            local exports, breakdown = TradeSystem.calculateExports(
+            local exports, breakdown, tradeDetails = TradeSystem.calculateExports(
                 nation, allNations, scenario,
-                scenario == Config.SCENARIOS.MERCANTILIST and DiplomacySystem.getState or nil
+                DiplomacySystem.getState,
+                NationState.getRelation
             )
             local imports  = TradeSystem.calculateImports(nation, exports, scenario)
             local navyCost = NavalSystem.calculateNavalCost(nation, scenario)
@@ -464,9 +735,34 @@ local function runSimulation(scenario)
             exportResults[nation.id]   = exports
             importResults[nation.id]   = imports
             navyCostResults[nation.id] = navyCost
+
+            -- Successful trade improves relations
+            -- Extra boost when delivering urgently needed resources
+            if tradeDetails then
+                for partnerId, resources in pairs(tradeDetails) do
+                    if #resources > 0 then
+                        NationState.changeRelation(nation.id, partnerId, Config.RELATION_TRADE_BOOST)
+
+                        -- Check if we delivered a resource the partner urgently needed
+                        local partner = NationState.getNation(partnerId)
+                        if partner then
+                            for _, deliveredRes in ipairs(resources) do
+                                if deliveredRes ~= "ManufacturedGoods" and deliveredRes ~= "Technology" then
+                                    if partner.resources[deliveredRes]
+                                        and partner.resources[deliveredRes] < Config.RESOURCE_MIN_NEED * 2 then
+                                        -- We supplied something they really needed!
+                                        NationState.changeRelation(nation.id, partnerId,
+                                            Config.RELATION_NEED_FULFILLED_BOOST)
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
         end
 
-        -- 6. Resolve plunder — track gains and losses per nation
+        -- 6. Resolve plunder — with explosion animations
         local plunderGainedMap = {}
         local plunderLostMap   = {}
         local plunderLog = NavalSystem.resolvePlunder(allNations, scenario)
@@ -481,6 +777,25 @@ local function runSimulation(scenario)
                     )
                     table.insert(tickLogs, logMsg)
                     print(logMsg)
+
+                    -- Play explosion at a random point between the two nations
+                    -- and damage relations
+                    for _, victim in ipairs(allNations) do
+                        if victim.id ~= key then
+                            local victimLost = plunderLog["lost_" .. victim.id]
+                            if victimLost and victimLost > 0 then
+                                -- Explosion animation at midpoint
+                                local attackerPos = allIslandPositions[key]
+                                local victimPos = allIslandPositions[victim.id]
+                                local midPoint = (attackerPos + victimPos) / 2
+                                    + Vector3.new((math.random() - 0.5) * 30, 0, (math.random() - 0.5) * 30)
+                                playExplosion(midPoint)
+
+                                -- Raids severely damage relations
+                                NationState.changeRelation(key, victim.id, Config.RELATION_RAID_PENALTY)
+                            end
+                        end
+                    end
                 end
             elseif type(key) == "string" and key:sub(1, 5) == "lost_" then
                 local victimId = tonumber(key:sub(6))
@@ -490,7 +805,7 @@ local function runSimulation(scenario)
             end
         end
 
-        -- Record plunder events for data collection
+        -- Record plunder events
         for nationId, gained in pairs(plunderGainedMap) do
             local n = NationState.getNation(nationId)
             if n and gained > 0 then
@@ -498,7 +813,7 @@ local function runSimulation(scenario)
             end
         end
 
-        -- 6b. Resolve privateers — parse logs for structured data
+        -- 6b. Resolve privateers
         local privateerLogs = {}
         DiplomacySystem.resolvePrivateers(allNations, scenario, privateerLogs)
         parsePrivateerLogs(tick, privateerLogs)
@@ -507,9 +822,9 @@ local function runSimulation(scenario)
             print(msg)
         end
 
-        -- 6c. Harbour sabotage — parse logs for structured data
+        -- 6c. Harbour sabotage — now relationship-driven
         local sabotageLogs = {}
-        DiplomacySystem.resolveSabotage(allNations, scenario, sabotageLogs)
+        DiplomacySystem.resolveSabotage(allNations, scenario, sabotageLogs, NationState)
         parseSabotageLogs(tick, sabotageLogs)
         for _, msg in ipairs(sabotageLogs) do
             table.insert(tickLogs, msg)
@@ -520,6 +835,21 @@ local function runSimulation(scenario)
         for _, nation in ipairs(allNations) do
             NavalSystem.updateNavySize(nation, allNations, tick, scenario)
         end
+
+        -- 7b. Relationship maintenance: alliance boosts, embargo drains, decay
+        for _, nation in ipairs(allNations) do
+            for _, other in ipairs(allNations) do
+                if other.id > nation.id then
+                    local state = DiplomacySystem.getState(nation.id, other.id)
+                    if state == "allied" then
+                        NationState.changeRelation(nation.id, other.id, Config.RELATION_ALLIANCE_BOOST)
+                    elseif state == "embargo" then
+                        NationState.changeRelation(nation.id, other.id, Config.RELATION_EMBARGO_DRAIN)
+                    end
+                end
+            end
+        end
+        NationState.decayRelations()
 
         -- 8. Apply wealth changes + record tick data
         for _, nation in ipairs(allNations) do
@@ -540,9 +870,14 @@ local function runSimulation(scenario)
             end
             local balanceSign = delta >= 0 and "+" or ""
 
+            -- Economy tier display
+            local tierStr = "RAW"
+            if nation.economyTier == Config.ECONOMY_TIER.MANUFACTURE then tierStr = "MFG" end
+            if nation.economyTier == Config.ECONOMY_TIER.TECHNOLOGY then tierStr = "TECH" end
+
             table.insert(tickLogs, string.format(
-                "[%s] Earned %dg (exports) — Spent %dg (imports) — Navy upkeep %dg — Raided %dg → %s%dg net%s | Treasury: %dg",
-                nation.name,
+                "[%s] [%s] Earned %dg — Spent %dg — Navy %dg — Raided %dg → %s%dg net%s | Treasury: %dg",
+                nation.name, tierStr,
                 math.floor(exports), math.floor(imports),
                 math.floor(navyCost), math.floor(plunder),
                 balanceSign, math.floor(delta), trend,
@@ -560,7 +895,7 @@ local function runSimulation(scenario)
             table.insert(tickLogs, msg)
         end
 
-        -- 8.6 Record tick snapshot for data collection (after degradation = end-of-tick state)
+        -- 8.6 Record tick snapshot
         for _, nation in ipairs(allNations) do
             local tariffCount = 0
             if nation.tariffs then
@@ -594,6 +929,7 @@ local function runSimulation(scenario)
                 alliance_count    = allianceCount,
                 embargo_count     = embargoCount,
                 privateer_count   = DiplomacySystem.getPrivateers(nation.id),
+                economy_tier      = nation.economyTier or 1,
             })
         end
 
@@ -710,7 +1046,6 @@ local aggregates = DataCollector.computeAggregates()
 
 dataExportEvent:FireAllClients(csvData, eventCsv, aggregates)
 
--- Print to Roblox output (copyable from Studio)
 print("\n=== TICK DATA CSV ===")
 for line in csvData:gmatch("[^\n]+") do
     print(line)

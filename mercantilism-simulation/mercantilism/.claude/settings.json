@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls *.project.json)",
+      "Bash(rojo --version)",
+      "Read(//home/nnorian/.aftman/bin/**)",
+      "Read(//home/nnorian/.foreman/bin/**)",
+      "Read(//home/nnorian/**)",
+      "Bash(/home/nnorian/.local/bin/rojo build:*)"
+    ]
+  }
+}

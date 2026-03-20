@@ -1,8 +1,6 @@
 -- NationState.lua
 -- ModuleScript: manages in-memory state for all nations
 -- Place in ReplicatedStorage
--- NOTE: This module is intended for server-side use only.
--- Clients receive state updates via RemoteEvents.
 
 local RS = game:GetService("ReplicatedStorage")
 local Config = require(RS:WaitForChild("GameConfig"))
@@ -17,6 +15,7 @@ local _currentTick = 0
 local _scenario = nil
 local _retaliationCountdown = {}  -- keyed by nationId -> { [aggressorId] = ticksRemaining }
 local _tariffs = {}               -- _tariffs[fromId][targetId] = true/false
+local _relations = {}             -- _relations[id1][id2] = score (0-100)
 
 -- ─── Initialization ──────────────────────────────────────────────────────────
 
@@ -28,32 +27,57 @@ function NationState.init(scenario)
     _scenario = scenario
     _retaliationCountdown = {}
     _tariffs = {}
+    _relations = {}
 
     for _, nationData in ipairs(Config.NATIONS) do
+        -- Build resource inventory: start with some stock of each resource
+        local resources = {}
+        for _, res in ipairs(Config.RAW_RESOURCES) do
+            resources[res] = Config.RESOURCE_START_STOCK
+        end
+        -- Own resource starts higher (they produce it)
+        resources[nationData.resource] = Config.RESOURCE_MAX_STOCK * 0.7
+
         local nation = {
             id             = nationData.id,
             name           = nationData.name,
             color          = nationData.color,
-            resource       = nationData.resource,
+            resource       = nationData.resource,  -- primary raw resource produced
             position       = nationData.position,
             wealth         = Config.INITIAL_WEALTH,
             tradeShips     = Config.INITIAL_TRADE_SHIPS,
             warships       = Config.INITIAL_WARSHIPS,
             navyCost       = Config.INITIAL_WARSHIPS * Config.WARSHIP_COST_PER_TICK,
-            tariffs        = {},       -- tariffs[targetId] = true means this nation imposes tariff on targetId
+            tariffs        = {},
             exportEarnings = 0,
             importSpending = 0,
             plunderGained  = 0,
             tradeBalance             = 0,
-            consecutiveNegativeTicks = 0,    -- ticks in a row with negative trade balance
+            consecutiveNegativeTicks = 0,
             degradationLevel         = "healthy",
-            tickHistory              = {},   -- array of { tick, exports, imports, plunder, navyCost, wealth }
+            tickHistory              = {},
+
+            -- New: resource system
+            resources      = resources,       -- { Meat=N, Logs=N, Ore=N, Herbs=N }
+            economyTier    = Config.ECONOMY_TIER.RAW,  -- 1=raw, 2=manufacture, 3=technology
+            -- Track what cargo each trade ship is currently carrying (for visuals)
+            shipCargo      = {},  -- shipCargo[shipIndex] = resourceName or "ManufacturedGoods" or "Technology"
         }
         _nations[nation.id] = nation
         table.insert(_nationList, nation)
 
         _retaliationCountdown[nation.id] = {}
         _tariffs[nation.id] = {}
+        _relations[nation.id] = {}
+    end
+
+    -- Initialize bilateral relations
+    for _, n in ipairs(_nationList) do
+        for _, m in ipairs(_nationList) do
+            if m.id ~= n.id then
+                _relations[n.id][m.id] = Config.RELATION_INITIAL
+            end
+        end
     end
 end
 
@@ -85,6 +109,108 @@ end
 
 function NationState.getScenario()
     return _scenario
+end
+
+-- ─── Relationship System ────────────────────────────────────────────────────
+
+function NationState.getRelation(id1, id2)
+    if not _relations[id1] then return Config.RELATION_INITIAL end
+    return _relations[id1][id2] or Config.RELATION_INITIAL
+end
+
+function NationState.changeRelation(id1, id2, delta)
+    if not _relations[id1] then _relations[id1] = {} end
+    if not _relations[id2] then _relations[id2] = {} end
+    local current1 = _relations[id1][id2] or Config.RELATION_INITIAL
+    local current2 = _relations[id2][id1] or Config.RELATION_INITIAL
+    -- Symmetric change
+    _relations[id1][id2] = math.clamp(current1 + delta, 0, 100)
+    _relations[id2][id1] = math.clamp(current2 + delta, 0, 100)
+end
+
+function NationState.setRelation(id1, id2, value)
+    if not _relations[id1] then _relations[id1] = {} end
+    if not _relations[id2] then _relations[id2] = {} end
+    _relations[id1][id2] = math.clamp(value, 0, 100)
+    _relations[id2][id1] = math.clamp(value, 0, 100)
+end
+
+-- Decay relations toward neutral each tick
+function NationState.decayRelations()
+    for _, n in ipairs(_nationList) do
+        for _, m in ipairs(_nationList) do
+            if m.id > n.id then
+                local current = _relations[n.id][m.id] or Config.RELATION_INITIAL
+                if current > Config.RELATION_INITIAL then
+                    NationState.changeRelation(n.id, m.id, -Config.RELATION_DECAY_RATE)
+                elseif current < Config.RELATION_INITIAL then
+                    NationState.changeRelation(n.id, m.id, Config.RELATION_DECAY_RATE)
+                end
+            end
+        end
+    end
+end
+
+function NationState.getRelationsSummary()
+    local result = {}
+    for _, n in ipairs(_nationList) do
+        result[n.id] = {}
+        for _, m in ipairs(_nationList) do
+            if m.id ~= n.id then
+                result[n.id][tostring(m.id)] = _relations[n.id][m.id] or Config.RELATION_INITIAL
+            end
+        end
+    end
+    return result
+end
+
+-- ─── Economy Tier ───────────────────────────────────────────────────────────
+
+function NationState.updateEconomyTier(nation)
+    if nation.wealth >= Config.TIER_THRESHOLD_TECHNOLOGY then
+        nation.economyTier = Config.ECONOMY_TIER.TECHNOLOGY
+    elseif nation.wealth >= Config.TIER_THRESHOLD_MANUFACTURE then
+        nation.economyTier = Config.ECONOMY_TIER.MANUFACTURE
+    else
+        nation.economyTier = Config.ECONOMY_TIER.RAW
+    end
+end
+
+-- ─── Resource Management ────────────────────────────────────────────────────
+
+-- Produce own resource each tick
+function NationState.produceResources(nation)
+    nation.resources[nation.resource] = math.min(
+        Config.RESOURCE_MAX_STOCK,
+        (nation.resources[nation.resource] or 0) + Config.RESOURCE_OWN_PRODUCTION
+    )
+end
+
+-- Consume resources each tick
+function NationState.consumeResources(nation)
+    for _, res in ipairs(Config.RAW_RESOURCES) do
+        nation.resources[res] = math.max(0, (nation.resources[res] or 0) - Config.RESOURCE_CONSUMPTION)
+    end
+end
+
+-- Check if nation needs a specific resource (below saturation)
+function NationState.needsResource(nation, resourceName)
+    local stock = nation.resources[resourceName] or 0
+    return stock < Config.RESOURCE_MAX_STOCK
+end
+
+-- Check if nation urgently needs a resource (below minimum)
+function NationState.urgentlyNeedsResource(nation, resourceName)
+    local stock = nation.resources[resourceName] or 0
+    return stock < Config.RESOURCE_MIN_NEED
+end
+
+-- Add resource to nation's stockpile
+function NationState.addResource(nation, resourceName, amount)
+    nation.resources[resourceName] = math.min(
+        Config.RESOURCE_MAX_STOCK,
+        (nation.resources[resourceName] or 0) + amount
+    )
 end
 
 -- ─── Wealth Management ───────────────────────────────────────────────────────
@@ -136,8 +262,6 @@ end
 
 -- ─── Tariff Management ───────────────────────────────────────────────────────
 
--- setTariff(fromId, targetId, enabled)
--- If enabled = true, starts a retaliation countdown for the target nation.
 function NationState.setTariff(fromId, targetId, enabled)
     local nation = _nations[fromId]
     if not nation then
@@ -153,21 +277,19 @@ function NationState.setTariff(fromId, targetId, enabled)
     _tariffs[fromId][targetId] = enabled or false
     nation.tariffs[targetId] = enabled or false
 
-    -- Start retaliation countdown for the targeted nation (they may retaliate)
     if enabled and not wasAlreadySet then
         local targetNation = _nations[targetId]
         if targetNation then
             if _retaliationCountdown[targetId] == nil then
                 _retaliationCountdown[targetId] = {}
             end
-            -- The target will retaliate against fromId after RETALIATION_DELAY ticks
             _retaliationCountdown[targetId][fromId] = Config.RETALIATION_DELAY
         end
+        -- Tariffs damage relations
+        NationState.changeRelation(fromId, targetId, -8)
     end
 end
 
--- hasTariff(fromId, targetId) → bool
--- Returns true if nation fromId has imposed a tariff on targetId.
 function NationState.hasTariff(fromId, targetId)
     if _tariffs[fromId] == nil then
         return false
@@ -175,20 +297,15 @@ function NationState.hasTariff(fromId, targetId)
     return _tariffs[fromId][targetId] == true
 end
 
--- tickRetaliationCountdowns()
--- Decrements counters; when a countdown reaches 0,
--- the nation retaliates by setting tariffs on whoever tariffed them.
 function NationState.tickRetaliationCountdowns()
     for retaliatorId, countdowns in pairs(_retaliationCountdown) do
         local toRemove = {}
         for aggressorId, remaining in pairs(countdowns) do
             local newRemaining = remaining - 1
             if newRemaining <= 0 then
-                -- Retaliate: set tariff on the aggressor
                 local retaliator = _nations[retaliatorId]
                 local aggressor  = _nations[aggressorId]
                 if retaliator and aggressor then
-                    -- Only retaliate if not already tariffing them
                     if not NationState.hasTariff(retaliatorId, aggressorId) then
                         if _tariffs[retaliatorId] == nil then
                             _tariffs[retaliatorId] = {}
@@ -214,7 +331,6 @@ end
 
 -- ─── Summary ─────────────────────────────────────────────────────────────────
 
--- getSummary() → structured table of all nation data suitable for RemoteEvent firing
 function NationState.getSummary()
     local summary = {
         tick              = _currentTick,
@@ -222,15 +338,21 @@ function NationState.getSummary()
         globalWealth      = NationState.getGlobalWealth(),
         globalWealthHistory = _globalWealthHistory,
         nations           = {},
+        relations         = NationState.getRelationsSummary(),
     }
 
     for _, nation in ipairs(_nationList) do
-        -- Serialize Color3 and Vector3 as plain tables for RemoteEvent compatibility
         local tariffList = {}
         for targetId, active in pairs(nation.tariffs) do
             if active then
                 table.insert(tariffList, targetId)
             end
+        end
+
+        -- Serialize resources
+        local resSerialized = {}
+        for _, res in ipairs(Config.RAW_RESOURCES) do
+            resSerialized[res] = math.floor(nation.resources[res] or 0)
         end
 
         table.insert(summary.nations, {
@@ -251,6 +373,9 @@ function NationState.getSummary()
             activeTariffs            = tariffList,
             degradationLevel         = nation.degradationLevel or "healthy",
             consecutiveNegativeTicks = nation.consecutiveNegativeTicks or 0,
+            -- New fields
+            economyTier    = nation.economyTier or 1,
+            resources      = resSerialized,
         })
     end
 

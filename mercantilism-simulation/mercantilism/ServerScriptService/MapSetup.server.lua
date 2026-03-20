@@ -182,7 +182,8 @@ local function weldTo(part, hull)
 end
 
 -- Build a trade ship model (all non-hull parts welded so PivotTo moves everything)
-local function buildTradeShip(name, parent, spawnPos, nationColor)
+-- Two-color system: hull = nation color, cargo stripe = resource color
+local function buildTradeShip(name, parent, spawnPos, nationColor, resourceColor)
     local model = Instance.new("Model")
     model.Name   = name
     model.Parent = parent
@@ -190,20 +191,29 @@ local function buildTradeShip(name, parent, spawnPos, nationColor)
     local hullColor = nationColor
     local deckColor = Color3.new(nationColor.R*0.72, nationColor.G*0.72, nationColor.B*0.72)
     local woodDark  = Color3.fromRGB(90, 55, 18)
+    local cargoColor = resourceColor or Color3.fromRGB(180, 160, 100)
 
-    -- Hull (anchored, PrimaryPart)
+    -- Hull (anchored, PrimaryPart) — nation color
     local hull = p({ Name="Hull", Size=Vector3.new(6, 3, 14),
         Position=spawnPos,
         Color=hullColor, Material=Enum.Material.Wood,
         CanCollide=false }, model)
     model.PrimaryPart = hull
 
-    -- Bow section: narrower block extending forward
+    -- Cargo stripe along both sides of hull — resource color
+    weldTo(p({ Name="CargoStripeL", Size=Vector3.new(0.5, 1.2, 12),
+        Position=spawnPos + Vector3.new(-3.2, 0.3, 0),
+        Color=cargoColor, Material=Enum.Material.SmoothPlastic }, model), hull)
+    weldTo(p({ Name="CargoStripeR", Size=Vector3.new(0.5, 1.2, 12),
+        Position=spawnPos + Vector3.new(3.2, 0.3, 0),
+        Color=cargoColor, Material=Enum.Material.SmoothPlastic }, model), hull)
+
+    -- Bow section
     weldTo(p({ Name="Bow", Size=Vector3.new(4, 3, 5),
         Position=spawnPos + Vector3.new(0, 0, -9.5),
         Color=hullColor, Material=Enum.Material.Wood }, model), hull)
 
-    -- Bowsprit: thin pole angled forward-up
+    -- Bowsprit
     weldTo(p({ Name="Bowsprit", Size=Vector3.new(0.7, 0.7, 6),
         CFrame=CFrame.new(spawnPos + Vector3.new(0, 1.5, -13.5)) * CFrame.Angles(0.28, 0, 0),
         Color=woodDark, Material=Enum.Material.Wood }, model), hull)
@@ -212,6 +222,11 @@ local function buildTradeShip(name, parent, spawnPos, nationColor)
     weldTo(p({ Name="Deck", Size=Vector3.new(5.5, 0.5, 13),
         Position=spawnPos + Vector3.new(0, 1.8, 0),
         Color=deckColor, Material=Enum.Material.Wood }, model), hull)
+
+    -- Cargo hold visible on deck — resource color crate
+    weldTo(p({ Name="CargoHold", Size=Vector3.new(3, 1.5, 4),
+        Position=spawnPos + Vector3.new(0, 2.5, 2),
+        Color=cargoColor, Material=Enum.Material.SmoothPlastic }, model), hull)
 
     -- Stern cabin
     weldTo(p({ Name="Cabin", Size=Vector3.new(4.5, 2.5, 3.5),
@@ -224,7 +239,7 @@ local function buildTradeShip(name, parent, spawnPos, nationColor)
         Position=mastBase + Vector3.new(0, 8, 0),
         Color=woodDark, Material=Enum.Material.Wood }, model), hull)
 
-    -- Main sail (cream canvas)
+    -- Main sail
     weldTo(p({ Name="MainSail", Size=Vector3.new(7, 8, 0.35),
         Position=mastBase + Vector3.new(0, 11, 0),
         Color=Color3.fromRGB(240, 235, 205), Material=Enum.Material.Fabric,
@@ -665,10 +680,11 @@ for _, nd in ipairs(Config.NATIONS) do
         3,
         nd.position.Z + portDir.Z * (Config.ISLAND_SIZE.X / 2))
 
+    local resourceColor = Config.RESOURCE_COLORS[nd.resource] or Color3.fromRGB(180, 160, 100)
     for i = 1, Config.INITIAL_TRADE_SHIPS do
         local offset = Vector3.new(portDir.Z, 0, -portDir.X) * ((i - 1) * 9 - 4)
         buildTradeShip(nd.name .. "_TradeShip_" .. i, shipsFolder,
-            portSpawn + offset, nd.color)
+            portSpawn + offset, nd.color, resourceColor)
     end
 
     for i = 1, Config.INITIAL_WARSHIPS do

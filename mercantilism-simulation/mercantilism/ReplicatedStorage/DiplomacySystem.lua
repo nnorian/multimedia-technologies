@@ -116,7 +116,7 @@ function DiplomacySystem.resolveSabotage(nations, scenario, logs, nationState)
                 if victim.id ~= attacker.id then
                     local state = DiplomacySystem.getState(attacker.id, victim.id)
                     if state ~= DiplomacySystem.State.ALLIED and victim.tradeShips > 1 then
-                        local rel = nationState and nationState.getRelation(attacker.id, victim.id) or 50
+                        local rel = nationState and nationState.getRelationFrom(attacker.id, victim.id) or 50
                         if rel < worstRelation then
                             worstRelation = rel
                             target = victim
@@ -130,9 +130,10 @@ function DiplomacySystem.resolveSabotage(nations, scenario, logs, nationState)
 
                 if math.random() < Config.SABOTAGE_SUCCESS_RATE then
                     target.tradeShips = math.max(1, target.tradeShips - 1)
-                    -- Sabotage worsens relations heavily
+                    -- Sabotage worsens relations asymmetrically
                     if nationState then
-                        nationState.changeRelation(attacker.id, target.id, -20)
+                        nationState.changeRelationDirected(attacker.id, target.id,
+                            Config.RELATION_SABOTAGE_AGGRESSOR, Config.RELATION_SABOTAGE_VICTIM_OK)
                     end
                     if logs then
                         table.insert(logs, string.format(
@@ -141,9 +142,10 @@ function DiplomacySystem.resolveSabotage(nations, scenario, logs, nationState)
                         ))
                     end
                 else
-                    -- Failed sabotage still damages relations
+                    -- Failed sabotage still damages relations asymmetrically
                     if nationState then
-                        nationState.changeRelation(attacker.id, target.id, -10)
+                        nationState.changeRelationDirected(attacker.id, target.id,
+                            Config.RELATION_SABOTAGE_AGGRESSOR, Config.RELATION_SABOTAGE_VICTIM_FAIL)
                     end
                     if logs then
                         table.insert(logs, string.format(
@@ -167,7 +169,8 @@ function DiplomacySystem.evaluateDiplomacy(nation, allNations, tick, logs, natio
     for _, partner in ipairs(allNations) do
         if partner.id ~= nation.id then
             local state = DiplomacySystem.getState(nation.id, partner.id)
-            local relation = nationState and nationState.getRelation(nation.id, partner.id) or 50
+            -- Use directed relation: how THIS nation feels about the partner
+            local relation = nationState and nationState.getRelationFrom(nation.id, partner.id) or 50
 
             -- ── Check resource dependency ─────────────────────────────────
             -- Does this nation urgently need the partner's resource?
@@ -205,7 +208,7 @@ function DiplomacySystem.evaluateDiplomacy(nation, allNations, tick, logs, natio
                 -- Won't embargo a nation whose resource we urgently need
                 if not needsPartnerResource
                     and relation <= Config.RELATION_EMBARGO_THRESHOLD
-                    and math.random() < 0.40 then
+                    and math.random() < 0.15 then  -- was 0.40; less trigger-happy
                     DiplomacySystem.setState(nation.id, partner.id, DiplomacySystem.State.EMBARGO)
                     if nationState then
                         nationState.changeRelation(nation.id, partner.id, -10)
@@ -280,7 +283,7 @@ function DiplomacySystem.evaluateDiplomacy(nation, allNations, tick, logs, natio
         local worstRival = nil
         for _, other in ipairs(allNations) do
             if other.id ~= nation.id then
-                local rel = nationState and nationState.getRelation(nation.id, other.id) or 50
+                local rel = nationState and nationState.getRelationFrom(nation.id, other.id) or 50
                 if rel < worstRelation and other.tradeShips > 0 then
                     worstRelation = rel
                     worstRival = other

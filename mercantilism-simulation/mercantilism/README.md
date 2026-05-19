@@ -1,37 +1,120 @@
 # Mercantilism Simulation
 
-A Roblox game simulating mercantilist vs free-trade economics between four historical nations (England, France, Spain, Netherlands).
+A Roblox game simulating mercantilist vs free-trade economics between four fantasy nations (Ironhaven, Goldspire, Emberveil, Drifthollow).
 
 ## How to Run
 
+Open the latest versioned `.rbxl` file in Roblox Studio and hit **Play**.
+
+---
+
+## How to produce a new versioned `.rbxl` after code changes
+
+All simulation logic lives in the `.lua` source files. The `.rbxl` is a binary
+Roblox place file that embeds those scripts. To build a new versioned file after
+making code changes, use **remodel**.
+
 ### Prerequisites
 
-- [Roblox Studio](https://www.roblox.com/create) installed
-- [Rojo](https://github.com/rojo-rbx/rojo) installed
+**remodel** must be installed once:
 
-**Install Rojo via cargo:**
 ```bash
-cargo install rojo
+cargo install remodel
+# adds ~/.cargo/bin/remodel
 ```
 
-Make sure `~/.cargo/bin` is in your PATH:
+Requires Rust/Cargo. On Arch Linux it is already available:
+
 ```bash
-export PATH="$HOME/.cargo/bin:$PATH"
+cargo --version   # cargo 1.94.0 or later
 ```
 
-### Build and Open
+### Workflow
 
-Build the project into a `.rbxl` file:
-```bash
-rojo build -o MercantilismSimulation.rbxl
+#### 1. Make your code changes
+
+Edit the source `.lua` files in `ReplicatedStorage/` and `ServerScriptService/`.
+
+#### 2. Update CHANGELOG.md
+
+Add a version entry describing what changed and why.
+
+#### 3. Edit `patch_v52.lua` for the new version number
+
+Open `patch_v52.lua` and update the two filename lines:
+
+```lua
+-- top: source base file (last stable version)
+local game = remodel.readPlaceFile("MercantilismSimulation_v5.2.rbxl")
+
+-- bottom: output file
+remodel.writePlaceFile(game, "MercantilismSimulation_v5.3.rbxl")
 ```
 
-Then open `MercantilismSimulation.rbxl` in Roblox Studio and hit **Play**.
+#### 4. Run the patch script
 
-### Live Sync (Alternative)
+From the `mercantilism/` directory:
 
-If you want changes to sync live while editing the Lua files:
+```bash
+~/.cargo/bin/remodel run patch_v52.lua
+```
+
+The new `.rbxl` file is created. Open it in Roblox Studio to test.
+
+### Adding a new script to the patch
+
+Add an entry to the `patches` table in `patch_v52.lua`:
+
+```lua
+{ parent = RS,  name = "MyNewModule", file = "ReplicatedStorage/MyNewModule.lua" },
+```
+
+Use `RS` for `ReplicatedStorage` and `SSS` for `ServerScriptService`.
+
+### How it works internally
+
+`remodel.setRawProperty(instance, "Source", "String", src)` — note `"String"`
+with a capital S is the correct Roblox type name. `"string"` (lowercase) does
+not work.
+
+### Version naming convention
+
+| Change type | Example |
+|---|---|
+| New feature or system | v5 → v6 |
+| Bug fix or balance change | v5.2 → v5.3 |
+
+---
+
+## Project structure
+
+```
+mercantilism/
+├── ReplicatedStorage/
+│   ├── GameConfig.lua              constants
+│   ├── NationState.lua             nation state & relationships
+│   ├── TradeSystem.lua             export/import calculations
+│   ├── NavalSystem.lua             plunder & arms race
+│   ├── DiplomacySystem.lua         alliances, embargoes, privateers
+│   └── DegradationSystem.lua       fleet decay & export penalties
+├── ServerScriptService/
+│   └── GameManager.server.lua      main simulation loop
+├── StarterPlayer/StarterPlayerScripts/
+│   └── SimulationUI.client.lua     HUD
+├── patch_v52.lua                   remodel build script
+├── default.project.json            Rojo project config (live sync alternative)
+├── CHANGELOG.md                    version history
+└── MercantilismSimulation_vX.Y.rbxl   versioned place files
+```
+
+---
+
+## Live sync alternative (Rojo)
+
+If you prefer live sync instead of building a new file each time:
 
 1. Install the [Rojo plugin](https://www.roblox.com/library/13916111004/Rojo) in Roblox Studio
-2. Run `rojo serve` in the project directory
-3. Connect via the Rojo plugin in Studio
+2. Run `rojo serve` in this directory
+3. Open any `.rbxl` in Studio and click **Connect** in the Rojo plugin
+
+Changes to `.lua` files will sync instantly into the open Studio session.

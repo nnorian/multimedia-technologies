@@ -1,5 +1,234 @@
 # Mercantilism Simulation — Changelog
 
+## v5.2 — Trade Flow & Embargo Cascade Fixes (2026-03-29)
+
+### Diagnosed from simulation run data
+
+**5 problems observed in CSV output:**
+
+**1. Universal embargo by tick 6 → exports = 0 for 18 of 24 mercantilist ticks**
+`RELATION_RAID_VICTIM = -25` dropped relations 50→25 in a single successful raid — instantly reaching embargo territory. `RELATION_EMBARGO_THRESHOLD = 25` was only 25 points from the 50 neutral starting point. Once one embargo formed, `RELATION_EMBARGO_DRAIN = -3/tick` pulled nearby pairs into embargo too (cascade).
+
+**2. Free trade resource saturation → income collapses from ~100g to ~2g by tick 5**
+Root cause: `OWN_PRODUCTION(15) - OWN_CONSUMPTION(8) - UNITS_SOLD(12 × 2/3ships × 3partners = 24) = −17 units/tick`. Starting stock of 70 units depleted in ~4 ticks. Once stock = 0, `tradeAmount = 0` → `routeIncome = 0`. Trade collapses.
+
+**3. No route income floor**
+When resources ran out or all partners were saturated, routeIncome = 0 with no minimum. Active (non-embargoed) routes should always earn base commerce.
+
+**4. Wrong academic result**
+Mercantilist global wealth (14,942g) >> Free trade (4,487g). Should be reversed — free trade is supposed to be positive-sum. The inversion was caused by free trade income collapse (issue 2) and random event windfalls compounding at already-high mercantilist wealth.
+
+**5. Emberveil permanently stuck at ~0**
+Bankrupt, 0 allies → no foreign aid, no trade (embargoed by all) → permanently below 100g.
+
+### Fixes
+
+**Resource balance (stops free trade collapse):**
+
+| Constant | Old | New | Effect |
+|---|---|---|---|
+| `RESOURCE_CONSUMPTION` | 8 | **4** | Import rate (4 units/tick) now matches consumption |
+| `RESOURCE_TRADE_AMOUNT` | 12 | **6** | Units shipped halved; income formula unchanged |
+| `RESOURCE_OWN_PRODUCTION` | 15 | **20** | Stock stable: 20−4−12 = **+4/tick** — never runs out |
+| `RESOURCE_MAX_STOCK` | 100 | **200** | Saturation now takes 40+ ticks (beyond game length) |
+| `RESOURCE_MIN_NEED` | 20 | **15** | Adjusted urgency threshold for new scale |
+
+Math: buyer receives 6×(2/3)=4 units/tick, consumes 4/tick → **net 0 → stock stays at 40 forever**.
+
+**Embargo cascade prevention:**
+
+| Constant | Old | New | Effect |
+|---|---|---|---|
+| `RELATION_EMBARGO_THRESHOLD` | 25 | **10** | Needs 40-point drop from neutral, not 25 |
+| `RELATION_RAID_VICTIM` | −25 | **−10** | One raid no longer pushes to embargo territory in 1 hit |
+| `RELATION_DECAY_RATE` | 1 | **3** | Faster recovery toward 50 — damage doesn't compound |
+| `RELATION_EMBARGO_DRAIN` | −3 | **−1** | Slower cascade; 1 embargo can't drag others down |
+| `RELATION_RAID_PENALTY` | −15 | **−5** | Legacy symmetric field updated to match |
+
+**DiplomacySystem.lua:** Embargo declaration probability: `0.40 → 0.15`
+
+**TradeSystem.lua:** Added `BASE_ROUTE_INCOME_FLOOR = 10` — minimum income per active non-embargoed route, applied only when no resource income was generated.
+
+### Expected result after fixes
+
+| Metric | Before | After (projected) |
+|---|---|---|
+| Exports collapse tick | Tick 6 | Never (or tick 18+) |
+| Free trade steady income | +2g/tick | +33g/tick |
+| Free trade global wealth | 4,487g | ~7,200g |
+| Mercantilist global wealth | 14,942g | ~5,500g |
+| Academic result | Mercantilist wins (wrong) | Free trade wins (correct) |
+
+### Modified Files
+| File | Changes |
+|---|---|
+| `GameConfig.lua` | 9 constant changes (resource balance + relation damage) + `BASE_ROUTE_INCOME_FLOOR` |
+| `TradeSystem.lua` | Route income floor before relation modifier |
+| `DiplomacySystem.lua` | Embargo probability 0.40 → 0.15 |
+
+---
+
+## v5.1 — Economic Stability Fix (2026-03-29)
+
+### Problem
+All nations went bankrupt before tick 8 in the mercantilist scenario. Three compounding causes:
+
+**1. Divergent arms race (`ARMS_RACE_ALPHA = 1.25 > 1`)**
+With alpha > 1, the Richardson reaction function `C_target = 1.25 × rival_cost + 15` escalates without bound. By tick 5, all nations had 4+ warships, each costing 120–240g/tick — far exceeding trade income.
+
+**2. Quadratic plunder at max warships**
+`W warships × (N−1) victims × rate × amount` = at 4 warships: `4 × 3 × 0.45 × 85 = 459g expected plunder loss per tick`. Trade income was only ~70g. Net per tick: **−389g**.
+
+**3. BASE_EXPORT_INCOME too low for RAW tier viability**
+`basePrice = 95 / 3 partners = 31.67g/route`. After distance penalty (~0.74): total exports ≈ **70g/tick**. This barely covers even 1 warship (30g). Any arms race made the economy unviable immediately.
+
+### Fixes
+
+| Constant | Old | New | Reason |
+|---|---|---|---|
+| `BASE_EXPORT_INCOME` | 95 | **160** | ~120g/tick total at RAW tier — covers 1–2 warships |
+| `ARMS_RACE_ALPHA` | 1.25 | **0.70** | Alpha < 1 → convergent race, not runaway escalation |
+| `ARMS_RACE_BETA` | 15 | **20** | Slightly higher baseline |
+| `PLUNDER_SUCCESS_RATE` | 0.45 | **0.20** | 1 warship × 3 victims = 0.6 expected hits/tick |
+| `PLUNDER_AMOUNT` | 85 | **50** | Reduces single-hit shock; max plunder at 4 ships ≈ 120g |
+| `MAX_WARSHIPS` | 8 | **4** | Caps damage ceiling from arms race |
+
+**New: Voluntary disarmament** (`NavalSystem.lua`)
+When `targetWarships < nation.warships`, nations now decommission 1 warship/tick. Previously warships only ever increased, making any buildup permanent even after threats receded.
+
+**Wealth balance at steady state (2 warships, no tariffs):**
+- Exports: ~120g → Imports: ~66g → Navy: 60g → **Net: +−6g** (slight pressure — arms aren't free)
+- At 1 warship: **Net: +24g/tick** (healthy baseline)
+
+### Modified Files
+| File | Changes |
+|---|---|
+| `GameConfig.lua` | 6 constant changes (see table above) |
+| `NavalSystem.lua` | Voluntary disarmament path; `canAfford` threshold raised to 10× warship cost |
+
+---
+
+## v5.0 — Mathematical Model Corrections (2026-03-23)
+
+### Summary
+Four critical/high-priority fixes to the economic and diplomatic models, addressing issues identified in the model analysis (see `MODEL_ANALYSIS.md`).
+
+---
+
+### Fix 1: Allied Foreign Aid (Death Spiral Recovery)
+
+**Problem:** Nations entering degradation (critical/bankrupt) had no recovery path — the export penalty created a reinforcing collapse loop with no escape except random events.
+
+**Solution:** Allied nations now automatically send foreign aid to struggling allies:
+- Triggers when ally reaches **critical** or **bankrupt** degradation level
+- Donor must have wealth ≥ **500g**
+- Donor sends **10% of own wealth** as aid
+- Relations boosted by **+8** per aid transfer
+- Logged as `[AID] Ironhaven sends 120g foreign aid to struggling ally Emberveil!`
+
+This makes alliances serve as economic insurance and creates a strategic reason to maintain good relations before a crisis hits.
+
+**New constants:**
+```
+FOREIGN_AID_RATIO            = 0.10
+FOREIGN_AID_MIN_DONOR_WEALTH = 500
+FOREIGN_AID_RELATION_BOOST   = 8
+```
+
+---
+
+### Fix 2: Warship Raids Skip Allies
+
+**Problem:** The plunder system rolled raid attempts against ALL non-self nations, including allies. This meant a nation could simultaneously gain +5 alliance relation boost and lose -15 from raiding the same partner — a direct contradiction.
+
+**Solution:** `NavalSystem.resolvePlunder()` now takes a `getDiploState` parameter and **skips plunder rolls against allied nations**. Warships only raid neutral and embargoed targets.
+
+**Changed signature:**
+```lua
+-- Before:
+NavalSystem.resolvePlunder(nations, scenario)
+-- After:
+NavalSystem.resolvePlunder(nations, scenario, getDiploState)
+```
+
+---
+
+### Fix 3: Asymmetric Relationship Changes
+
+**Problem:** All relationship modifiers were symmetric — when A raids B, both get -15. But the attacker chose to raid (less emotional impact) while the victim was attacked (deep resentment). This made diplomatic dynamics unrealistic.
+
+**Solution:** New `changeRelationDirected(aggressorId, victimId, deltaAggressor, deltaVictim)` function for aggressive actions. Mutual events (trade, alliance) remain symmetric.
+
+**Asymmetric modifiers:**
+| Action | Aggressor | Victim |
+|---|---|---|
+| Raid/plunder | **-5** | **-25** |
+| Sabotage (success) | **-8** | **-30** |
+| Sabotage (failed) | **-8** | **-15** |
+| Tariff imposed | **-3** | **-12** |
+
+**New functions:**
+- `NationState.changeRelationDirected(aggressorId, victimId, deltaAgg, deltaVic)` — asymmetric relation change
+- `NationState.getRelationFrom(id1, id2)` — how id1 feels about id2 (used for diplomatic decisions)
+- `NationState.getRelation(id1, id2)` — average of both directions (used for trade modifiers, display)
+
+**Decay** now operates on each direction independently (A→B and B→A decay separately toward 50).
+
+**Diplomatic AI** now uses `getRelationFrom()` — each nation's decisions are based on **its own perspective**, not a shared score. This means a victim of sabotage may embargo the attacker while the attacker still sees the relationship as acceptable.
+
+**New constants:**
+```
+RELATION_RAID_AGGRESSOR        = -5
+RELATION_RAID_VICTIM           = -25
+RELATION_SABOTAGE_AGGRESSOR    = -8
+RELATION_SABOTAGE_VICTIM_OK    = -30
+RELATION_SABOTAGE_VICTIM_FAIL  = -15
+RELATION_TARIFF_AGGRESSOR      = -3
+RELATION_TARIFF_VICTIM         = -12
+```
+
+---
+
+### Fix 4: Distance-Based Trade Efficiency
+
+**Problem:** Nations have spatial positions and ships animate between them, but distance had zero gameplay effect. Trade between adjacent nations and diagonal nations was identical.
+
+**Solution:** Trade routes now factor in geographic distance:
+```
+efficiency = 1 / (1 + (distance / REFERENCE_DISTANCE) × DISTANCE_PENALTY)
+```
+
+**Distance effects (map is 320×320):**
+| Route | Distance | Efficiency |
+|---|---|---|
+| Adjacent (same edge) | ~320 studs | **77%** |
+| Diagonal (opposite corners) | ~452 studs | **70%** |
+
+This makes geographic neighbors natural trade partners and introduces spatial strategy.
+
+**New constants:**
+```
+TRADE_REFERENCE_DISTANCE = 320
+TRADE_DISTANCE_PENALTY   = 0.3
+```
+
+---
+
+### Modified Files
+
+| File | Changes |
+|---|---|
+| `GameConfig.lua` | Foreign aid constants, asymmetric relation constants, spatial trade constants |
+| `NationState.lua` | `changeRelationDirected()`, `getRelationFrom()`, asymmetric decay, directed tariff relations |
+| `NavalSystem.lua` | `resolvePlunder()` takes `getDiploState`, skips allied nations |
+| `TradeSystem.lua` | `getDistanceEfficiency()`, distance modifier applied to route income, directed tariff relation check |
+| `DiplomacySystem.lua` | Uses `getRelationFrom()` for decisions, asymmetric sabotage relation changes |
+| `GameManager.server.lua` | Passes `DiplomacySystem.getState` to plunder, allied foreign aid step (8.55), asymmetric raid relations |
+| `ECONOMIC_MODEL.md` | Updated sections 5.1, 6.1, 6.2, 9.2, 12.2; added spatial trade, foreign aid, asymmetric tables |
+| `MODEL_ANALYSIS.md` | Marked 4 issues as FIXED in priority table |
+
+---
+
 ## v4.1 — Resource-Need-Driven Diplomacy (2026-03-20)
 
 ### Summary

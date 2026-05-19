@@ -8,6 +8,17 @@ local DegradationSystem = require(RS:WaitForChild("DegradationSystem"))
 
 local TradeSystem = {}
 
+-- ─── Spatial Trade Efficiency ────────────────────────────────────────────────
+-- Closer nations trade more efficiently; distant routes cost more
+local function getDistanceEfficiency(nationA, nationB)
+    local posA = nationA.position
+    local posB = nationB.position
+    if not posA or not posB then return 1.0 end
+    local distance = (Vector3.new(posA.X, 0, posA.Z) - Vector3.new(posB.X, 0, posB.Z)).Magnitude
+    -- efficiency = 1 / (1 + distance/reference × penalty)
+    return 1 / (1 + (distance / Config.TRADE_REFERENCE_DISTANCE) * Config.TRADE_DISTANCE_PENALTY)
+end
+
 -- ─── Resource Trade: determines what a nation wants to buy ──────────────────
 
 -- Returns a list of { resource, urgency } that the buyer needs
@@ -124,6 +135,12 @@ function TradeSystem.calculateExports(nation, allNations, scenario, getDiploStat
                 end
             end
 
+            -- Route income floor: active routes always earn something even without resource demand
+            -- Models trade in services, luxury goods, and general commerce
+            if routeIncome == 0 then
+                routeIncome = Config.BASE_ROUTE_INCOME_FLOOR * shipsPerRoute
+            end
+
             -- Relationship modifier: better relations = better trade terms
             if getRelation then
                 local rel = getRelation(nation.id, partner.id)
@@ -150,6 +167,10 @@ function TradeSystem.calculateExports(nation, allNations, scenario, getDiploStat
                     routeIncome = routeIncome * (1 - Config.TARIFF_RATE)
                 end
             end
+
+            -- Distance efficiency: closer nations trade better
+            local distEff = getDistanceEfficiency(nation, partner)
+            routeIncome = routeIncome * distEff
 
             routeIncome = math.max(0, routeIncome)
             breakdown[partner.id] = routeIncome
@@ -206,23 +227,24 @@ function TradeSystem.evaluateTariffPolicy(nation, allNations, currentTick, natio
         return
     end
 
-    -- Now tariff decisions are relationship-based too
-    if nation.tradeBalance < 0 then
-        for _, other in ipairs(allNations) do
-            if other.id ~= nation.id then
-                local relation = nationState.getRelation(nation.id, other.id)
-                -- Only tariff nations we have poor relations with
-                if relation < 60 then
-                    if not nationState.hasTariff(nation.id, other.id) then
-                        nationState.setTariff(nation.id, other.id, true)
-                        print(string.format(
-                            "[TradeSystem] %s imposes tariff on %s (relation: %d).",
-                            nation.name, other.name, math.floor(relation)
-                        ))
-                    end
+    -- Mercantilist protectionism: impose tariffs on richer rivals with poor relations.
+    -- (tradeBalance is always positive by design, so we use wealth rivalry instead)
+    for _, other in ipairs(allNations) do
+        if other.id ~= nation.id then
+            local relation = nationState.getRelationFrom(nation.id, other.id)
+            -- Tariff rivals who are significantly wealthier AND have poor relations
+            local rivalRicher = other.wealth > nation.wealth * Config.TARIFF_RIVAL_WEALTH_RATIO
+            if rivalRicher and relation < 60 then
+                if not nationState.hasTariff(nation.id, other.id) then
+                    nationState.setTariff(nation.id, other.id, true)
+                    print(string.format(
+                        "[TradeSystem] %s imposes tariff on %s — protectionism! (rival wealth: %dg, relation: %d)",
+                        nation.name, other.name, math.floor(other.wealth), math.floor(relation)
+                    ))
                 end
             end
         end
+    end
     end
 end
 

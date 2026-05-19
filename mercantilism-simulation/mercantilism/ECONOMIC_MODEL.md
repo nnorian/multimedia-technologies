@@ -1,391 +1,575 @@
-# Mercantilism Simulation — Economic Model & Interaction Rules
+# Mercantilism Simulation — Economic Model
 
-## Overview
-
-This document describes the complete economic model implemented in the simulation. The system models four competing nations in a mercantilist trade environment, comparing it against a free-trade alternative. Each nation produces one raw resource, trades with others, builds navies, forms alliances, imposes tariffs, and engages in espionage — all driven by bilateral relationship scores.
-
-The simulation runs **24 ticks** (trading seasons) per scenario, with each tick lasting **12 seconds** of real time.
+> **Version:** v5.3 | **Last updated:** 2026-04-08
+> All constants reflect the current `GameConfig.lua`. Outdated values are noted where relevant.
 
 ---
 
-## 1. Nations
+## Table of Contents
 
-| Nation | Primary Resource | Color | Starting Position |
+1. [Overview](#1-overview)
+2. [Nations](#2-nations)
+3. [Tick Execution Order](#3-tick-execution-order)
+4. [Wealth Formula](#4-wealth-formula)
+5. [Resource System](#5-resource-system)
+6. [Economy Tier System](#6-economy-tier-system)
+7. [Trade System](#7-trade-system)
+8. [Relationship System](#8-relationship-system)
+9. [Diplomacy System](#9-diplomacy-system)
+10. [Tariff System](#10-tariff-system)
+11. [Naval & Plunder System](#11-naval--plunder-system)
+12. [Privateer System](#12-privateer-system)
+13. [Sabotage System](#13-sabotage-system)
+14. [Degradation System](#14-degradation-system)
+15. [Random Market Events](#15-random-market-events)
+16. [State Machines](#16-state-machines)
+17. [Scenario Comparison](#17-scenario-comparison)
+18. [Data Collection](#18-data-collection)
+19. [Constants Reference](#19-constants-reference)
+20. [Academic Framework](#20-academic-framework)
+
+---
+
+## 1. Overview
+
+The simulation models four competing IT-sector nations in a **mercantilist** trade environment and compares it against a **free-trade** alternative. Each nation:
+
+- Produces one raw resource and must import the other three through trade
+- Builds navies, forms alliances, imposes tariffs, and engages in espionage
+- Accumulates wealth through exports, plunder, and economic diplomacy
+- Progresses through three economy tiers as wealth grows
+
+The simulation runs **24 ticks** (trading seasons) per scenario, each tick lasting **12 real seconds**. Both scenarios run back-to-back and the final global wealth totals are compared.
+
+**Academic thesis being tested:**
+> *Free trade produces higher global wealth (positive-sum) while mercantilism creates winners and losers through zero-sum redistribution.*
+
+---
+
+## 2. Nations
+
+| Nation | Primary Resource | Color | Map Position |
 |---|---|---|---|
-| Ironhaven | Ore | Dark blue `(0, 36, 125)` | (-160, 1, -160) |
-| Goldspire | Herbs | Blue `(0, 85, 164)` | (160, 1, -160) |
-| Emberveil | Meat | Red `(170, 21, 27)` | (-160, 1, 160) |
-| Drifthollow | Logs | Amber `(255, 174, 0)` | (160, 1, 160) |
+| **Endava** | Ore | Dark blue `(0, 36, 125)` | Top-left (-160, 1, -160) |
+| **Amdaris** | Herbs | Blue `(0, 85, 164)` | Top-right (160, 1, -160) |
+| **GridDynamics** | Meat | Red `(170, 21, 27)` | Bottom-left (-160, 1, 160) |
+| **Globant** | Logs | Amber `(255, 174, 0)` | Bottom-right (160, 1, 160) |
 
-**Starting conditions per nation:**
-- Wealth: **1,000g**
-- Trade ships: **2**
-- Warships: **1**
-- Own resource stock: **70 units** (70% of max)
-- Other resources stock: **40 units each**
-- Economy tier: **RAW** (tier 1)
-- All bilateral relationships: **50** (neutral)
+**Starting state per nation (tick 0):**
 
----
-
-## 2. Resource System
-
-### 2.1 Resource Types
-
-Four raw resources exist: **Meat**, **Logs**, **Ore**, **Herbs**. Each nation is the sole producer of one resource and must acquire the other three through trade.
-
-### 2.2 Production & Consumption (per tick)
-
-| Parameter | Value |
+| Attribute | Value |
 |---|---|
-| Own resource production | +15 units |
-| Consumption of each resource | -8 units |
-| Maximum stock (saturation) | 100 units |
-| Minimum need threshold (urgent) | 20 units |
-
-Each tick, a nation produces 15 units of its own resource (capped at 100) and consumes 8 units of all four resources. This creates a structural **deficit of 8 units per tick** for each of the three non-produced resources, forcing nations to trade.
-
-### 2.3 Buying Behavior
-
-A nation's import demand is determined by its current stock levels:
-
-| Stock Level | Buying Behavior | Price Modifier |
-|---|---|---|
-| **< 20** (urgent) | Actively seeks resource, pays premium | **×1.5** (50% premium) |
-| **20–99** (normal need) | Willing to buy at market price | ×1.0 |
-| **≥ 100** (saturated) | Will **not buy** — trade route blocked | N/A |
-
-A nation never buys its own primary resource (it produces it).
-
-### 2.4 Trade Amount
-
-Each trade ship delivers **12 units** of resource per route per tick, limited by the seller's available stock. Ships are divided equally among trade partners:
-
-```
-units_delivered = min(12 × (trade_ships / num_partners), seller_stock)
-```
+| Wealth | 1,000g |
+| Trade ships | 2 |
+| Warships | 1 |
+| Own resource stock | 70 units |
+| Other resource stocks | 40 units each |
+| Economy tier | RAW (1) |
+| All bilateral relations | 50 (neutral) |
+| Diplomatic state with all | NEUTRAL |
+| Active tariffs | none |
+| Active privateers | 0 |
 
 ---
 
-## 3. Economy Tiers (Production Progression)
+## 3. Tick Execution Order
 
-Nations progress through three economy tiers as their wealth grows:
+Every tick the following steps execute **in this exact sequence**:
 
-| Tier | Name | Wealth Threshold | Unlocks | Price Multiplier |
-|---|---|---|---|---|
-| 1 | **RAW** | 0g (start) | Raw resource exports only | ×1.0 |
-| 2 | **MANUFACTURE** | ≥ 1,400g | Manufactured goods production | ×2.2 |
-| 3 | **TECHNOLOGY** | ≥ 2,200g | Technology production | ×4.0 |
-
-### Tier Rules
-
-- **Manufactured goods** (tier 2): Sold to any trade partner whose economy tier is **lower than MANUFACTURE**. Represents value-added processing of raw materials.
-- **Technology** (tier 3): Sold **only to allied nations**. Represents advanced knowledge transfer that requires trust. This creates a strong incentive to maintain alliances at higher economic levels.
-- Tier is recalculated at the start of each tick based on current wealth. If wealth drops below a threshold, the nation **regresses** to a lower tier.
+```
+1.  Update economy tiers          (wealth threshold check)
+2.  Produce & consume resources   (+20 own, -4 all)
+3.  Resource-need relation boosts (warm toward needed suppliers)
+4.  Animate ships                 (visual, fire-and-forget)
+5.  Random market events          (40% chance)
+6.  Tariff AI decisions           (mercantilist only, tick ≥ 2)
+7.  Diplomatic AI decisions       (mercantilist only, every 2 ticks from tick 3)
+8.  Calculate trade               (exports, imports, resource transfer)
+9.  Resolve plunder               (warship raids + explosion animations)
+10. Resolve privateers            (corsair interceptions)
+11. Resolve sabotage              (harbour sabotage attempts)
+12. Update navy sizes             (Richardson arms race)
+13. Relationship maintenance      (alliance boost, embargo drain, decay)
+14. Apply wealth changes          (W = W + exports - imports + plunder - navy)
+15. Apply degradation             (fleet losses, export penalties)
+16. Allied foreign aid            (critical/bankrupt ally rescue)
+17. Record tick snapshot          (CSV data collector)
+18. Broadcast to clients          (WealthUpdated RemoteEvent)
+```
 
 ---
 
 ## 4. Wealth Formula
 
-Each tick, a nation's wealth changes according to:
-
 ```
-W_i(t) = W_i(t-1) + X_i - M_i + P_i - C_i
+W_i(t) = W_i(t−1) + X_i − M_i + P_i − C_i
 ```
 
-Where:
-- **X_i** = export income (gold earned from selling resources and goods)
-- **M_i** = import spending (gold spent on buying resources)
-- **P_i** = plunder gained (gold seized through naval raiding)
-- **C_i** = navy maintenance cost (upkeep of warships)
+| Symbol | Meaning |
+|---|---|
+| `W_i(t)` | Nation i's wealth at end of tick t |
+| `X_i` | Export income earned this tick |
+| `M_i` | Import spending this tick |
+| `P_i` | Plunder gained (raids + privateers) |
+| `C_i` | Navy maintenance cost |
 
-Wealth cannot go below 0.
+Wealth is floored at **0** — nations cannot go negative.
+
+**Note:** Plunder *losses* are applied directly to `nation.wealth` inside `NavalSystem.resolvePlunder()`, before step 14. The `wealth_delta` column in the CSV reflects only *gains* (X − M + P_gained − C); subtract `plunder_lost` from the CSV to get the true net change.
 
 ---
 
-## 5. Trade System
+## 5. Resource System
 
-### 5.1 Export Income Calculation
+### 5.1 Resources
 
-For each trade partner, export income is calculated as:
+| Resource | Produced by | Cargo Color |
+|---|---|---|
+| Ore | Endava | Steel-grey |
+| Herbs | Amdaris | Green |
+| Meat | GridDynamics | Red |
+| Logs | Globant | Brown |
+
+### 5.2 Production & Consumption (per tick)
+
+Each tick, **before** trade:
 
 ```
-route_income = base_price × price_multiplier × urgency_premium × relationship_modifier × free_trade_bonus × alliance_bonus × tariff_penalty × degradation_penalty
+own_resource_stock += 20          (capped at 200)
+all_4_resources    -= 4 each      (floored at 0)
+```
+
+**Net own-stock change per tick:**
+```
++20 (production) − 4 (consumption) − 4 × (ships/partners) per partner ≈ +4/tick
+```
+Own stock grows slowly and never depletes over a 24-tick game.
+
+**Net imported-resource change per tick:**
+```
++4 (received from supplier) − 4 (consumption) = 0
+```
+Imported stocks remain stable at their starting level (~40 units) throughout the game.
+
+### 5.3 Buying Behavior
+
+A nation **will not buy its own primary resource**. For the other three:
+
+| Stock Level | Buying State | Price Modifier |
+|---|---|---|
+| **< 15** (urgent) | Actively seeks resource | **×1.5** (50% premium) |
+| **15 – 199** (normal) | Willing to buy at base price | ×1.0 |
+| **≥ 200** (saturated) | Will NOT buy — route income blocked | — |
+
+Saturation at 200 units takes 40+ ticks to reach — beyond the 24-tick game length, so income never collapses from saturation.
+
+### 5.4 Units Transferred per Trade
+
+```
+units_delivered = min(RESOURCE_TRADE_AMOUNT × (tradeShips / numPartners), seller_stock)
+               = min(6 × (2/3), seller_stock)
+               = min(4, seller_stock)
+```
+
+The buyer gains up to 4 units per tick per seller. The seller's stock is checked — if stock is 0, no trade occurs and **the route income floor applies instead** (see §7.2).
+
+---
+
+## 6. Economy Tier System
+
+### 6.1 Tiers
+
+| Tier | Name | Wealth Required | Exports | Price Multiplier |
+|---|---|---|---|---|
+| 1 | **RAW** | 0g | Raw resources only | ×1.0 |
+| 2 | **MANUFACTURE** | ≥ 1,400g | Raw + Manufactured goods | ×2.2 on MFG |
+| 3 | **TECHNOLOGY** | ≥ 2,200g | Raw + MFG + Technology | ×4.0 on TECH |
+
+### 6.2 Rules
+
+- **Manufactured goods** sell to any partner with `economyTier < MANUFACTURE`. Scaled by `shipsPerRoute`.
+- **Technology** sells **only to allied partners**. Restricted because advanced knowledge transfer requires diplomatic trust.
+- Tier is **recalculated every tick**. A wealth drop below a threshold causes **immediate regression**.
+
+### 6.3 Tier State Machine
+
+```
+        wealth ≥ 1400g              wealth ≥ 2200g
+RAW ──────────────────→ MANUFACTURE ──────────────────→ TECHNOLOGY
+ ↑                           |                               |
+ └───────────────────────────┘ wealth < 1400g                │
+ ↑                                                           │
+ └───────────────────────────────────────────────────────────┘
+                            wealth < 1400g
+```
+
+Regression is instant — there is no hysteresis. A nation at 2,205g that loses 10g regresses from TECHNOLOGY to MANUFACTURE on the next tick.
+
+---
+
+## 7. Trade System
+
+### 7.1 Export Income Formula
+
+For each non-embargoed partner:
+
+```
+route_income =
+  base_price
+  × urgency_premium      (if partner urgently needs your resource)
+  × [+ manufactured_price × shipsPerRoute]   (if tier ≥ 2)
+  × [+ technology_price  × shipsPerRoute]    (if tier ≥ 3 AND allied)
+  × relationship_modifier
+  × free_trade_multiplier
+  × alliance_bonus
+  × (1 − tariff_penalty) if partner has tariff on you
+  × distance_efficiency
+```
+
+Then, after all routes are summed:
+```
+total_exports = sum(route_incomes) × degradation_penalty
 ```
 
 **Base price per route:**
 ```
-base_price = BASE_EXPORT_INCOME / number_of_partners = 95 / 3 ≈ 31.7g
+base_price = BASE_EXPORT_INCOME / num_partners = 160 / 3 ≈ 53.3g
 ```
+This is earned **only when** the partner needs your resource (`need.resource == nation.resource`). If no resource need exists, the floor applies (see §7.2).
 
-**Price multiplier** (by goods type):
-| Goods | Multiplier |
-|---|---|
-| Raw resource | ×1.0 |
-| Manufactured goods | ×2.2 |
-| Technology | ×4.0 |
+**Multipliers summary:**
 
-**Urgency premium**: ×1.5 when buyer's stock is below 20 units.
+| Factor | Value | Condition |
+|---|---|---|
+| Urgency premium | ×1.5 | Partner stock < 15 |
+| Manufactured goods | base × 2.2 × shipsPerRoute | Seller tier ≥ 2, buyer tier < 2 |
+| Technology | base × 4.0 × shipsPerRoute | Seller tier ≥ 3 AND allied |
+| Relationship bonus | ×(1 + (rel−50) × 0.003) | Relation > 50; max +15% at 100 |
+| Relationship penalty | ×max(0.3, 1−(50−rel)×0.005) | Relation < 50; max −35% at 0 |
+| Free trade bonus | ×1.65 | Free trade scenario only |
+| Alliance bonus | ×1.30 | Allied diplomatic state |
+| Tariff penalty | ×0.50 | Partner has active tariff on you |
+| Distance efficiency | 1/(1 + dist/320 × 0.3) | Always; ~0.77 adjacent, ~0.70 diagonal |
+| Degradation penalty | ×0.80/0.55/0.30 | Struggling/Critical/Bankrupt |
 
-**Relationship modifier** (based on bilateral score, neutral = 50):
-- Above 50: `income × (1 + (relation - 50) × 0.003)` — up to +15% at relation 100
-- Below 50: `income × max(0.3, 1 - (50 - relation) × 0.005)` — up to -25% at relation 0, floored at 70% reduction
+### 7.2 Route Income Floor
 
-**Free trade bonus** (free trade scenario only): ×1.40
+When `routeIncome == 0` (no resource demand, not embargoed):
+```
+routeIncome = BASE_ROUTE_INCOME_FLOOR × shipsPerRoute = 10 × (2/3) ≈ 6.7g
+```
+This models base commerce (services, luxury goods) that happens even when primary goods aren't traded. Modifiers (distance, tariff, relationship) still apply afterward.
 
-**Alliance bonus**: ×1.30 for allied trade partners
-
-**Tariff penalty**: ×0.50 (50% income reduction per active tariff imposed by partner)
-
-**Degradation penalty** (based on nation health):
-| Level | Penalty |
-|---|---|
-| Healthy | ×1.00 |
-| Struggling | ×0.80 |
-| Critical | ×0.55 |
-| Bankrupt | ×0.30 |
-
-### 5.2 Import Spending
+### 7.3 Import Spending
 
 ```
 imports = exports × IMPORT_SPEND_RATIO = exports × 0.55
 ```
 
-If the nation has active tariffs (mercantilist only), import costs are further reduced:
+If the nation has active tariffs (mercantilist only), import costs decrease:
 ```
-reduction = TARIFF_RATE × active_tariff_count × 0.4   (capped at 80%)
-imports = imports × (1 - reduction)
+reduction = min(0.80, TARIFF_RATE × tariff_count × 0.4)
+imports   = imports × (1 − reduction)
 ```
 
-### 5.3 Embargo Effect
+### 7.4 Trade Net (typical healthy nation, RAW tier)
 
-When two nations are in an **embargo** state, **all trade between them is blocked** — both export income and resource transfer on that route are zero (`EMBARGO_TRADE_MULTIPLIER = 0.0`).
+```
+exports ≈ 53.3 × 3 routes × 0.74 distance = ~118g
+imports ≈ 118 × 0.55                        = ~65g
+navy    = 1 warship × 30g                   = ~30g
+net     = 118 − 65 − 30                     = +23g/tick   (mercantilist)
+
+free trade: exports × 1.65 ≈ 195g; imports ≈ 107g; navy = 20g (flat)
+net = 195 − 107 − 20 = +68g/tick
+```
 
 ---
 
-## 6. Bilateral Relationship System
+## 8. Relationship System
 
-### 6.1 Structure
+### 8.1 Structure
 
-Every pair of nations has a **symmetric** relationship score on a 0–100 scale, initialized at **50** (neutral). This score drives all diplomatic, trade, and military decisions.
+Every pair (A, B) has **two independent scores**: `A→B` and `B→A`, both on a 0–100 scale, initialized at **50** (neutral).
 
-### 6.2 Relationship Modifiers (per tick)
+- `getRelationFrom(A, B)` → A's view of B (used for A's own diplomatic decisions)
+- `getRelation(A, B)` → average of both directions (used for trade modifiers and display)
 
-| Action/Condition | Modifier | When Applied |
+### 8.2 Modifiers per Tick
+
+**Symmetric** (both directions change equally):
+
+| Event | Delta | When |
 |---|---|---|
-| Successful trade (per partner) | **+2** | After trade calculation |
-| Delivered urgently needed resource | **+3** | When partner's stock < 40 for delivered resource |
-| Being allied | **+5** | End of tick, per allied pair |
-| Urgently need partner's resource (stock < 20) | **+4** | After production/consumption |
-| Moderately low stock (< 40) of partner's resource | **+1** | After production/consumption |
-| Raiding/plundering a nation | **-15** | After successful plunder |
-| Imposing a tariff | **-8** | When tariff is set |
-| Embargo active | **-3** | End of tick, per embargoed pair |
-| Sabotage (successful) | **-20** | After sabotage success |
-| Sabotage (failed but uncovered) | **-10** | After sabotage failure |
-| Embargoed by needed supplier | **-6** | When stock < 20 and embargoed by supplier |
-| Both saturated, not allied | **-1** | When both nations have stock ≥ 90 of each other's resource |
-| Natural decay | **±1 toward 50** | End of tick, all pairs |
+| Successful trade with partner | **+3** | After trade calculation |
+| Delivered urgently needed resource | **+3** | Stock < 30 of delivered resource |
+| Being allied | **+5** | End-of-tick maintenance |
+| Urgently needs partner's resource (stock < 15) | **+4** | After production step |
+| Moderately low stock (< 30) of partner's resource | **+1** | After production step |
+| Embargo active | **−1** | End-of-tick maintenance |
+| Embargoed by needed supplier | **−6** | When stock < 15 + embargoed |
+| Both saturated + not allied | **−1** | When both stocks ≥ 180 |
+| Allied foreign aid given | **+8** | After aid transfer |
+| Natural decay toward 50 | **±1/tick** | Each direction independently |
 
-### 6.3 Relationship Thresholds
+**Asymmetric** (aggressor and victim feel differently):
 
-| Threshold | Value | Effect |
-|---|---|---|
-| Alliance formation | **≥ 75** (or ≥ 60 if needing partner's resource) | Can form commercial treaty |
-| Embargo declaration | **≤ 25** | Can declare trade embargo |
-| Raid threshold | **< 35** | More likely to commission privateers |
-| Tariff threshold | **< 60** | Will impose tariffs on this partner |
-
----
-
-## 7. Diplomacy System
-
-Diplomatic AI evaluates every **2 ticks** starting from **tick 3** (mercantilist scenario only). Decisions are deterministic thresholds with probabilistic execution.
-
-### 7.1 Alliance Formation
-
-**Conditions**: Relation ≥ 75 (or ≥ 60 if urgently needing partner's resource) AND current state is NEUTRAL.
-
-**Probability**: 35% per evaluation.
-
-**Effects**:
-- State changes to ALLIED for both nations
-- Relations boosted by +10
-- Alliance trade bonus (+30%) applied to route
-- Technology exports (tier 3) unlocked on route
-
-### 7.2 Embargo Declaration
-
-**Conditions**: Relation ≤ 25 AND current state is NEUTRAL AND nation does **not** urgently need partner's resource.
-
-**Probability**: 40% per evaluation.
-
-**Effects**:
-- State changes to EMBARGO for both nations
-- Relations worsened by -10
-- All trade on that route blocked (0 income, 0 resource transfer)
-
-**Resource dependency override**: If the nation urgently needs the partner's resource (stock < 20), the embargo is **blocked** regardless of relationship score. The simulation logs this as "too dependent on supply."
-
-### 7.3 Alliance Breakdown
-
-**Conditions**: Current state is ALLIED AND (relation < 55, OR partner's wealth > 1.8× own wealth with 35% chance).
-
-**Resource dependency modifier**: If urgently needing partner's resource, the break threshold drops to **40** instead of 55, making alliances with needed suppliers harder to break.
-
-**Effects**:
-- State reverts to NEUTRAL
-- No direct relation change (but loss of +5/tick alliance boost)
-
-### 7.4 Embargo Lifting
-
-**Conditions**: Current state is EMBARGO AND relation > 40.
-
-**Probability**: 30% per evaluation.
-
-**Resource dependency modifier**: If urgently needing partner's resource:
-- Probability increases to **55%**
-- Threshold drops to relation > **20**
-- Logged as "desperate for [resource]!"
-
-**Effects**:
-- State reverts to NEUTRAL
-- Relations boosted by +5
-
----
-
-## 8. Tariff System
-
-### 8.1 Tariff Imposition (Mercantilist Only)
-
-A nation imposes tariffs when:
-1. Its trade balance is **negative** (imports > exports)
-2. The target partner's relationship score is **< 60**
-3. Current tick ≥ **2** (TARIFF_START_TICK)
-
-### 8.2 Retaliation
-
-When a nation has a tariff imposed on it, it retaliates after a **1-tick delay** by imposing a reciprocal tariff.
-
-### 8.3 Tariff Effects
-
-- Tariff reduces the imposing nation's **import costs** (beneficial)
-- Tariff reduces the **export income** of the partner trading into that nation by 50%
-- Tariff imposition damages relations by **-8**
-
----
-
-## 9. Naval System
-
-### 9.1 Fleet Composition
-
-| Ship Type | Starting Count | Max | Function |
+| Event | Aggressor (A→B) | Victim (B→A) | When |
 |---|---|---|---|
-| Trade ships | 2 | No hard cap | Generate export income, carry resources |
-| Warships | 1 | 8 | Raid enemy trade for plunder, cost maintenance |
+| Raid / plunder | **−3** | **−10** | After successful plunder |
+| Sabotage (success) | **−8** | **−30** | After sabotage success |
+| Sabotage (fail, uncovered) | **−8** | **−15** | After sabotage failure |
+| Tariff imposed | **−3** | **−12** | When tariff is set |
 
-### 9.2 Plunder (Mercantilist Only)
+### 8.3 Thresholds
 
-Each warship has a **45% chance per tick** to intercept a rival's trade ship:
+| Threshold | Value | Unlocks |
+|---|---|---|
+| Alliance formation | ≥ **75** (or ≥ 60 if needing partner's resource) | Commercial treaty |
+| Embargo declaration | ≤ **22** | Trade embargo |
+| Privateer commission trigger | < **30** | Corsair commissioning |
+| Tariff trigger | partner wealth > own × **1.15** AND relation < 60 | Tariff imposition |
+
+### 8.4 Net Balance Analysis
+
+At neutral (50) with active trade, no raids:
 ```
-if random() ≤ 0.45 AND victim.tradeShips > 0:
-    amount = min(85g, victim.wealth)
++3 (trade) − 1 (decay above 50) = +2/tick  →  relations rise toward alliance
+```
+
+Under raids (0.20 hit rate × −10 victim penalty):
+```
++3 (trade) − 2 (expected raid damage) − 1 (decay) = 0/tick  →  stable near 50
+```
+
+Under sustained raiding + tariff imposition:
+```
+−2 (raids) − 12 (tariff) − 1 (decay) = −15 in tariff tick → can reach 22 (embargo) in ~2 tariff cycles
+```
+
+---
+
+## 9. Diplomacy System
+
+Diplomatic AI evaluates every **2 ticks** starting from **tick 3** (mercantilist only).
+
+### 9.1 Diplomatic States
+
+Each nation pair has one state: **NEUTRAL**, **ALLIED**, or **EMBARGO**.
+
+### 9.2 Alliance Formation
+
+**Trigger**: State = NEUTRAL, `getRelationFrom(self, partner) ≥ 75`
+(threshold drops to 60 if urgently needing partner's resource)
+
+**Probability**: 35% per evaluation cycle.
+
+**Effects**:
+- Both sides → ALLIED
+- Relations +10 (symmetric)
+- Alliance trade bonus (+30%) applied to route
+- Technology exports unlocked on this route
+
+### 9.3 Embargo Declaration
+
+**Trigger**: State = NEUTRAL, `getRelationFrom(self, partner) ≤ 22`
+
+**Blocked if**: Nation urgently needs partner's resource (stock < 15)
+
+**Probability**: 15% per evaluation cycle.
+
+**Effects**:
+- Both sides → EMBARGO
+- Relations −10 (symmetric)
+- All trade on this route blocked (0 income, 0 resource transfer)
+
+### 9.4 Alliance Breakdown
+
+**Trigger**: State = ALLIED AND (`getRelationFrom < 55` OR `partner.wealth > own.wealth × 1.8` with 35% chance)
+
+**Resource dependency**: If urgently needing partner's resource, breakdown threshold drops to 40 (harder to break).
+
+**Effects**: Both sides → NEUTRAL (no relation change).
+
+### 9.5 Embargo Lifting
+
+**Trigger**: State = EMBARGO AND `getRelationFrom > 40`
+(threshold drops to 20 if urgently needing partner's resource)
+
+**Probability**: 30% (or 55% if desperately needing partner's resource).
+
+**Effects**: Both sides → NEUTRAL. Relations +5.
+
+### 9.6 Privateer Commission
+
+**Trigger**: 0 active privateers, worst bilateral relation < 30, wealth > 180g.
+
+**Probability**: 35%.
+
+**Count**: `min(3, floor(wealth / 180))`, minimum 1.
+**Cost**: 120g per privateer.
+
+---
+
+## 10. Tariff System
+
+### 10.1 Imposition (Mercantilist only, tick ≥ 2)
+
+A nation imposes a tariff on a rival when **both** conditions hold:
+1. `rival.wealth > nation.wealth × 1.15` — rival has 15%+ more wealth (competitive protectionism)
+2. `getRelationFrom(self, rival) < 60` — relations are strained
+
+This models the historical mercantilist response: protect domestic industry when falling behind a wealthier competitor.
+
+> **Previous behavior (before v5.3):** Tariff fired when `tradeBalance < 0`. Since `imports = exports × 0.55` always, trade balance is always positive — tariffs **never fired**. This was a bug.
+
+### 10.2 Retaliation
+
+When a tariff is imposed, the victim retaliates after **1 tick** by imposing a reciprocal tariff. This creates a tariff war cascade:
+
+```
+Tick N:   Endava → tariff on Amdaris     (Amdaris relation drops −12)
+Tick N+1: Amdaris → tariff on Endava     (retaliation)
+          Both nations lose 50% of mutual trade income
+```
+
+### 10.3 Effects
+
+- The imposing nation's **import costs** decrease (beneficial for the imposer)
+- The partner's **export income** from this route drops by 50%
+- Relations: imposer −3, target −12 (asymmetric)
+
+---
+
+## 11. Naval & Plunder System
+
+### 11.1 Fleet
+
+| Type | Start | Max | Cost/tick |
+|---|---|---|---|
+| Trade ships | 2 | unlimited* | 0 |
+| Warships | 1 | **4** | **30g each** |
+
+*Trade ships can be lost to storms/sabotage/degradation; minimum is 1.
+
+### 11.2 Plunder (Mercantilist only)
+
+For each warship of attacker, for each non-allied victim:
+```
+if random() ≤ 0.20 AND victim.tradeShips > 0:
+    amount = min(50g, victim.wealth)
     victim.wealth  -= amount
     attacker.wealth += amount
 ```
 
-**Relationship impact**: Each successful raid applies **-15** to bilateral relations.
+**Allied nations are never raided** — the ally check occurs before the roll.
 
-### 9.3 Arms Race (Richardson Model)
+**Relation impact** (asymmetric): aggressor −3, victim −10.
 
-Warship buildup follows the Richardson arms race model:
+**Expected plunder per warship per tick:**
 ```
-C_target = 1.25 × max_rival_naval_cost + 15
-target_warships = floor(C_target / WARSHIP_COST_PER_TICK)
+3 victims × 0.20 rate × 50g = 30g gained
+3 attackers × 1 warship each × 0.20 × 50g = 30g lost
+Net average = 0 (zero-sum redistribution)
 ```
 
-A nation builds **+1 warship per tick** toward this target, capped at 8, only if it can afford it (wealth > 5× warship cost).
+### 11.3 Arms Race (Richardson Model)
 
-### 9.4 Naval Maintenance Cost
+```
+C_target = α × max_rival_cost + β
+         = 0.70 × max_rival_naval_cost + 20
+```
 
-**Mercantilist**: `cost = warships × 30g per tick`
+- **α = 0.70 < 1** → convergent arms race (does not escalate indefinitely)
+- At symmetric start (all 1 warship, 30g cost): `target = 0.70×30+20 = 41g → 1 warship` → no escalation from equal equilibrium
+- **Voluntary disarmament**: if `targetWarships < current`, the nation decommissions 1 warship/tick
+- Requires `wealth > WARSHIP_COST × 10 = 300g` to build
+- Capped at **4 warships**
 
-**Free Trade**: `cost = 15g per tick` (fixed baseline, no warship maintenance)
+**Free trade**: Fixed cost of **20g/tick** (ARMS_RACE_BETA only, no warship maintenance).
 
 ---
 
-## 10. Privateer System (Mercantilist Only)
+## 12. Privateer System
 
-### 10.1 Commission
+### 12.1 Resolution (Mercantilist only)
 
-A nation commissions privateers when:
-1. It has **0 active privateers**
-2. Its worst bilateral relationship is **< 35**
-3. Its wealth > **180g** (1.5× commission cost)
+For each nation with `privateers > 0`, for each non-allied victim:
+```
+success_rate = 0.55
+if diplomaticState == EMBARGO: success_rate × 1.4 = 0.77
 
-**Probability**: 35% per evaluation.
+if random() ≤ success_rate AND victim.tradeShips > 0:
+    amount = min(65g, victim.wealth)
+    victim.wealth  -= amount
+    attacker.wealth += amount
+```
 
-**Count**: `min(3, floor(wealth / 180))`, minimum 1.
+### 12.2 Privateers vs Regular Plunder
 
-**Cost**: **120g per privateer**.
-
-### 10.2 Resolution
-
-Each privateer attacks non-allied nations:
-- **Base success rate**: 55%
-- **Against embargoed targets**: 55% × 1.4 = **77%**
-- **Plunder per success**: min(65g, victim's wealth)
-
-### 10.3 Key Differences from Regular Plunder
-
-| | Regular Plunder | Privateer Raids |
+| | Regular plunder | Privateers |
 |---|---|---|
-| Requires | Warships | Commissioned privateers |
-| Success rate | 45% | 55% (77% vs embargoed) |
-| Amount per hit | 85g | 65g |
-| Targets | All rivals | Non-allied nations only |
-| Cost | 30g/tick maintenance | 120g one-time per corsair |
+| Source | Warships (permanent) | Commissioned corsairs (one-time) |
+| Success rate | 20% | 55% (77% vs embargoed) |
+| Amount per hit | 50g | 65g |
+| Cost | 30g/tick maintenance | 120g upfront per corsair |
+| Targets | All non-allied | All non-allied |
 
 ---
 
-## 11. Sabotage System (Mercantilist Only)
+## 13. Sabotage System
 
-### 11.1 Conditions
+### 13.1 Conditions (Mercantilist only)
 
-A nation attempts sabotage when:
-1. Its wealth ≥ **210g** (3× sabotage cost)
-2. Target has the **worst relationship** with attacker (below 40)
+A nation attempts harbour sabotage when:
+1. `wealth ≥ 210g` (3× cost)
+2. Target has the **worst relationship score** (below 40) of all non-allied rivals
 3. Target has **> 1 trade ship**
 
-**Attempt probability**: 28% per tick.
-**Cost**: 70g per operation.
+**Attempt probability per tick**: 28%.
+**Cost**: 70g per operation (deducted win or lose).
 
-### 11.2 Outcomes
+### 13.2 Outcomes
 
-| Outcome | Probability | Effect |
-|---|---|---|
-| **Success** | 55% | Target loses 1 trade ship, relations -20 |
-| **Failure** | 45% | 70g wasted, relations -10 |
+| Outcome | Chance | Effect on Target | Relation Change |
+|---|---|---|---|
+| **Success** | 55% | Loses 1 trade ship | Aggressor −8, Victim −30 |
+| **Failure** (uncovered) | 45% | No ship loss | Aggressor −8, Victim −15 |
 
 ---
 
-## 12. Degradation System
+## 14. Degradation System
 
-### 12.1 Degradation Levels
+### 14.1 Degradation Levels
 
-| Level | Wealth Threshold | Effects |
-|---|---|---|
-| **Healthy** | ≥ 600g | No penalties |
-| **Struggling** | 250–599g | Export penalty ×0.80; lose trade ship after 2 consecutive negative ticks |
-| **Critical** | 100–249g | Export penalty ×0.55; 50% chance to lose warship; 40% chance to lose trade ship |
-| **Bankrupt** | < 100g | Export penalty ×0.30; 65% chance to lose trade ship; 65% chance to lose warship |
+Checked at step 15 of each tick. Level is determined by **current wealth**:
+
+| Level | Wealth Range | Export Penalty | Fleet Effects |
+|---|---|---|---|
+| **Healthy** | ≥ 600g | ×1.00 | None |
+| **Struggling** | 250–599g | ×0.80 | Lose 1 trade ship after 2 consecutive negative-balance ticks |
+| **Critical** | 100–249g | ×0.55 | 50% chance to lose a warship; 40% chance to lose a trade ship |
+| **Bankrupt** | < 100g | ×0.30 | 65% chance to lose a trade ship; 65% chance to lose a warship |
 
 Trade ships cannot drop below **1** (minimum fleet).
 
-### 12.2 Visual Effects
+### 14.2 Allied Foreign Aid (Recovery Mechanic)
 
-Island base color changes with degradation:
-| Level | Color |
+After degradation is applied (step 16), if a nation is **critical** or **bankrupt**:
+
+```
+for each allied nation with wealth ≥ 500g:
+    aid = floor(donor.wealth × 0.10)
+    donor.wealth    -= aid
+    recipient.wealth += aid
+    relations(both) += 8
+```
+
+This breaks the death spiral: wealthy allies act as economic insurance. It creates a strategic incentive to form alliances **before** a crisis.
+
+### 14.3 Visual Feedback
+
+| Level | Island Color |
 |---|---|
 | Healthy | Lush green |
 | Struggling | Sandy yellow |
@@ -394,233 +578,395 @@ Island base color changes with degradation:
 
 ---
 
-## 13. Random Market Events
+## 15. Random Market Events
 
-Each tick has a **40% chance** of triggering one random event affecting one random nation:
+**40% chance** per tick of one event affecting one randomly selected nation:
 
 | Event | Effect |
 |---|---|
 | **Gold Rush** | +250g windfall |
-| **Plague** | Lose min(200g, 30% of wealth) |
-| **Great Storm** | Lose 1 trade ship (or 15% wealth if only 1 ship); plays sinking animation |
+| **Plague** | −min(200g, 30% of wealth) |
+| **Great Storm** | Lose 1 trade ship; if only 1 ship, lose 15% wealth instead |
 | **Market Boom** | +25% of current wealth |
-| **Market Crash** | -25% of current wealth |
+| **Market Crash** | −25% of current wealth |
 | **Mutiny** | Lose 1 warship (if > 1) |
-| **Trade Wind** | Gain 1 trade ship (if < 5) or +100g |
+| **Trade Wind** | Gain 1 trade ship (if < 5); else +100g |
+
+Events fire at step 5, before trade — they can affect the same tick's trade calculations. Nation selection is uniform random; over 24 ticks, expect ~2.4 events per nation on average.
 
 ---
 
-## 14. Scenario Comparison
+## 16. State Machines
 
-The simulation runs two scenarios back-to-back:
+### 16.1 Nation — Degradation State Machine
 
-### 14.1 Mercantilist Scenario
+```
+                 wealth ≥ 600
+              ┌──────────────────┐
+              │                  │
+              ▼                  │ foreign aid /
+┌─────────────────────┐          │ Gold Rush event
+│       HEALTHY       │          │
+│    wealth ≥ 600g    │          │
+│  export penalty ×1  │          │
+└─────────────────────┘          │
+          │                      │
+          │ wealth < 600         │
+          ▼                      │
+┌─────────────────────┐          │
+│     STRUGGLING      │──────────┘
+│  250g ≤ wealth < 600│
+│  export penalty ×0.8│
+│  lose trade ship    │
+│  after 2 neg. ticks │
+└─────────────────────┘
+          │
+          │ wealth < 250
+          ▼
+┌─────────────────────┐
+│      CRITICAL       │
+│  100g ≤ wealth < 250│
+│  export penalty ×0.55│
+│  50% lose warship   │
+│  40% lose tradeship │
+└─────────────────────┘
+          │                  ↑ allied aid
+          │ wealth < 100     │ kicks in here
+          ▼                  │
+┌─────────────────────┐      │
+│      BANKRUPT       │──────┘
+│    wealth < 100g    │
+│  export penalty ×0.3│
+│  65% lose tradeship │
+│  65% lose warship   │
+└─────────────────────┘
+```
 
-All systems are active:
-- Tariffs, retaliation
-- Naval plunder, arms race
-- Diplomacy (alliances, embargoes)
-- Privateers, sabotage
-- Resource-need-driven relations
-
-### 14.2 Free Trade Scenario
-
-Cooperative trade environment:
-- **No tariffs**
-- **No plunder** (plunder resolution returns empty)
-- **No privateers** (privateer resolution returns empty)
-- **No sabotage** (sabotage resolution skipped)
-- **No diplomatic decisions** (no alliances, embargoes)
-- **+40% export income bonus** (free trade multiplier)
-- **Fixed 15g naval cost** (no warship maintenance)
-- Resource production, consumption, trade, and saturation still active
-
-### 14.3 Expected Outcome
-
-Free trade should produce **higher total global wealth** (positive-sum trade) but the mercantilist scenario creates more interesting dynamics with winners and losers, demonstrating the core tension of mercantilist economic theory.
-
----
-
-## 15. Tick Execution Order
-
-Each tick executes the following steps in order:
-
-1. **Update economy tiers** — check wealth thresholds for all nations
-2. **Produce & consume resources** — +15 own resource, -8 all resources
-3. **Resource-need relationship adjustments** — boost relations with needed suppliers, penalize embargo by needed supplier
-4. **Animate ships** — visual movement of trade ships and warships
-5. **Random market events** — 40% chance of one event
-6. **Tariff decisions** — AI evaluates tariff policy (mercantilist only)
-7. **Diplomatic decisions** — alliance/embargo/privateer commission (mercantilist only, every 2 ticks from tick 3)
-8. **Calculate trade** — export/import for all nations, transfer resources, relationship boosts for successful trade
-9. **Resolve plunder** — warship raids with explosion animations
-10. **Resolve privateers** — corsair interceptions
-11. **Resolve sabotage** — harbour sabotage attempts
-12. **Update navy sizes** — arms race (Richardson model)
-13. **Relationship maintenance** — alliance boost, embargo drain, natural decay
-14. **Apply wealth changes** — W(t) = W(t-1) + exports - imports + plunder - navy cost
-15. **Apply degradation** — check thresholds, apply fleet losses
-16. **Record data** — snapshot for statistical analysis
-17. **Broadcast state** — send updated data to all clients
+Each level re-evaluates **every tick** based on current wealth. Recovery is possible in one tick with a large enough Gold Rush event or foreign aid transfer.
 
 ---
 
-## 16. Data Collection & Analysis
+### 16.2 Diplomatic State Machine (per nation pair)
 
-The simulation records two datasets:
+Evaluated every 2 ticks from tick 3 (mercantilist only).
 
-### 16.1 Per-Tick Snapshots (CSV)
+```
+                    relation ≥ 75
+                    35% chance
+              ┌─────────────────────┐
+              │                     ▼
+┌─────────────────────┐    ┌─────────────────────┐
+│       NEUTRAL       │    │       ALLIED        │
+│  base trade terms   │    │  +30% trade bonus   │
+│  plunder possible   │    │  tech exports open  │
+│  privateers possible│    │  no raids/privateers│
+└─────────────────────┘    │  +5 relation/tick   │
+              ▲             └─────────────────────┘
+              │                     │
+              │  relation < 55      │
+              │  OR rival 1.8× richer│
+              └─────────────────────┘
 
-Columns: `scenario, tick, nation, wealth, wealth_delta, exports, imports, plunder_gained, plunder_lost, navy_cost, trade_ships, warships, degradation_level, tariff_count, alliance_count, embargo_count, privateer_count, economy_tier`
+              │
+              │ relation ≤ 22
+              │ 15% chance
+              ▼
+┌─────────────────────┐
+│       EMBARGO       │
+│   trade = 0g        │
+│   resource blocked  │
+│  −1 relation/tick   │
+└─────────────────────┘
+              │
+              │ relation > 40
+              │ 30% chance
+              ▼
+          NEUTRAL  (embargo lifted, +5 relation)
+```
 
-### 16.2 Event Log (CSV)
-
-Columns: `scenario, tick, event_type, actor, target, detail, amount`
-
-Event types: `random_event, plunder, alliance_formed, embargo_declared, alliance_broken, embargo_lifted, privateer_commissioned, privateer_raid, sabotage_success, sabotage_failed`
-
-### 16.3 Computed Aggregates
-
-1. **Tariff-wealth correlation** — average wealth delta with vs without active tariffs
-2. **Alliance trade impact** — average exports with vs without active alliances
-3. **Arms race burden** — total navy cost as percentage of total exports
-4. **Random event distribution** — count of each event type per scenario
-5. **Plunder & privateer totals** — per-nation, per-scenario gains and losses
-6. **Scenario comparison** — total global wealth, average nation wealth, total exports, total navy cost
-7. **Gini coefficient** — wealth inequality measure (0 = perfect equality, 1 = total inequality)
-8. **Per-nation final wealth** — comparison across scenarios
+**Important**: ALLIED and EMBARGO are **mutually exclusive**. A pair can only be in one state. State is symmetric — both nations share the same state for the pair.
 
 ---
 
-## 17. Constants Reference
+### 16.3 Economy Tier State Machine
 
-### Economy
+```
+              wealth ≥ 1400g
+RAW (1) ─────────────────────────────→ MANUFACTURE (2)
+  ↑     ←─────────────────────────────         │
+  │            wealth < 1400g                  │ wealth ≥ 2200g
+  │                                            ▼
+  │                                    TECHNOLOGY (3)
+  │                                            │
+  └────────────────────────────────────────────┘
+                   wealth < 1400g
+```
+
+- Tier advances are **instant** when the threshold is crossed.
+- Regression is also **instant** — no hysteresis or momentum.
+- Technology tier gives 4× price multiplier but **only on allied routes**.
+
+---
+
+### 16.4 Tariff State Machine (per pair, mercantilist only)
+
+```
+                  rival.wealth > own × 1.15
+                  AND relation < 60
+                  AND tick ≥ 2
+NO TARIFF ───────────────────────────────→ TARIFF ACTIVE
+    ↑                                            │
+    │                                            │ victim retaliates
+    │     (no automated removal;                 │ after 1 tick
+    │      tariff persists until                 ▼
+    │      relations improve or             MUTUAL TARIFF
+    │      wealth gap closes)          (both nations imposing)
+    └──────────────────────────────────────────────┘
+           (relation change or wealth equalization)
+```
+
+Tariffs are **not automatically removed**. Once imposed, they persist. The only way to remove them is through a restarted simulation or if the code is extended to add removal logic.
+
+---
+
+### 16.5 Privateer State Machine
+
+```
+                 worst relation < 30
+                 wealth > 180g
+                 35% chance
+NO PRIVATEERS ──────────────────────────→ ACTIVE (1–3 corsairs)
+                                                  │
+                                                  │ privateers resolve
+                                                  │ (attack non-allied per tick)
+                                                  │
+                                                  ▼
+                                           (count depletes;
+                                            privateers are
+                                            one-time commissions
+                                            — count resets to 0
+                                            after each evaluation
+                                            if none re-commissioned)
+```
+
+---
+
+### 16.6 Nation — Full Per-Tick State Transition
+
+Below is the complete state an individual nation transitions through each tick:
+
+```
+START OF TICK
+│
+├─ [1] Tier recalculated from wealth
+├─ [2] Resources: own +20 (cap 200), all −4 (floor 0)
+├─ [3] Relations adjusted for resource needs
+├─ [5] Random event may fire (40%)
+├─ [6] Tariff policy: impose tariff if rival 15%+ richer + poor relation
+├─ [7] Diplomatic AI: evaluate alliance/embargo/privateer every 2 ticks
+│
+├─ [8] TRADE CALCULATION
+│   ├─ For each partner:
+│   │   ├─ If EMBARGO → income = 0, no resource transfer
+│   │   ├─ Else → earn base_price (if partner needs your resource)
+│   │   │        + floor income (if no resource income)
+│   │   │        × modifiers (urgency, tier, relation, distance, tariff)
+│   │   └─ Transfer resource units to partner
+│   └─ Total exports applied; imports = exports × 0.55
+│
+├─ [9]  Plunder: each warship rolls 20% per rival (skip allies)
+├─ [10] Privateers raid non-allied nations
+├─ [11] Sabotage: 28% chance if wealthy + poor relations
+├─ [12] Navy size updated (Richardson model)
+├─ [13] Relations maintained (alliance +5, embargo −1, decay ±1)
+│
+├─ [14] WEALTH UPDATE
+│   wealth += exports − imports + plunder_gained − navy_cost
+│
+├─ [15] DEGRADATION
+│   ├─ Level set from wealth (healthy/struggling/critical/bankrupt)
+│   └─ Fleet losses applied (random, level-dependent)
+│
+├─ [16] ALLIED AID
+│   └─ If critical/bankrupt → allies with ≥ 500g send 10% of their wealth
+│
+└─ [17–18] Data recorded and broadcast to clients
+```
+
+---
+
+## 17. Scenario Comparison
+
+### 17.1 Mercantilist Scenario
+
+All systems active. Nations impose tariffs, raid each other, form and break alliances, commission privateers, and engage in sabotage. The arms race drives permanent naval costs. Global wealth is lower due to:
+- Naval maintenance costs (30g/warship/tick)
+- Trade disruption from tariffs and embargoes
+- Plunder (zero-sum redistribution, not wealth creation)
+
+Expected final global wealth: **~9,000–10,000g**
+
+### 17.2 Free Trade Scenario
+
+Cooperative environment:
+- **No tariffs, plunder, privateers, sabotage**
+- **No diplomatic AI** (no alliances or embargoes formed)
+- Free trade bonus: **×1.65** on all exports
+- Fixed naval cost: **20g/tick** (no warship maintenance)
+- Resources still trade normally
+
+Expected final global wealth: **~11,000–12,000g** (~15–25% more than mercantilist)
+
+### 17.3 Academic Result
+
+```
+W_global(free) > W_global(mercantilist)
+```
+
+This validates Adam Smith's thesis: free trade is positive-sum (both parties gain), while mercantilism is largely zero-sum (plunder and tariffs redistribute rather than create wealth).
+
+The Gini coefficient is also computed: mercantilism typically shows higher inequality (one nation wins big via plunder/tier-3 advantage) while free trade distributes wealth more evenly.
+
+---
+
+## 18. Data Collection
+
+### 18.1 Per-Tick CSV
+
+```
+scenario, tick, nation, wealth, wealth_delta, exports, imports,
+plunder_gained, plunder_lost, navy_cost, trade_ships, warships,
+degradation_level, tariff_count, alliance_count, embargo_count,
+privateer_count, economy_tier
+```
+
+**Note on `wealth_delta`:** This is `exports − imports + plunder_gained − navy_cost`. It does NOT include `plunder_lost`. Actual net wealth change = `wealth_delta − plunder_lost`.
+
+### 18.2 Event Log CSV
+
+```
+scenario, tick, event_type, actor, target, detail, amount
+```
+
+Event types: `random_event`, `plunder`, `alliance_formed`, `embargo_declared`, `alliance_broken`, `embargo_lifted`, `privateer_commissioned`, `privateer_raid`, `sabotage_success`, `sabotage_failed`
+
+### 18.3 Computed Aggregates
+
+| Aggregate | Description |
+|---|---|
+| Tariff–wealth correlation | Avg wealth delta with vs without active tariffs |
+| Alliance trade impact | Avg exports with vs without active alliances |
+| Arms race burden | Total navy cost as % of total exports |
+| Gini coefficient | Wealth inequality (0=equal, 1=one nation holds all) |
+| Scenario comparison | Global wealth, avg wealth, total exports, total navy cost |
+| Per-nation final wealth | Ranked comparison across both scenarios |
+
+---
+
+## 19. Constants Reference
+
+### Nations & Simulation
 | Constant | Value | Description |
 |---|---|---|
 | `INITIAL_WEALTH` | 1,000g | Starting treasury |
-| `BASE_EXPORT_INCOME` | 95g | Base gold per tick from all routes combined |
-| `RESOURCE_BONUS` | 35g | Bonus when resource is in demand |
-| `IMPORT_SPEND_RATIO` | 0.55 | Imports = 55% of exports |
-| `FREE_TRADE_BONUS` | 0.40 | +40% export income in free trade |
+| `TICK_DURATION` | 12s | Real seconds per tick |
+| `MAX_TICKS` | 24 | Ticks per scenario |
 
 ### Resources
-| Constant | Value | Description |
+| Constant | Current | Description |
 |---|---|---|
-| `RESOURCE_MIN_NEED` | 20 | Below this = urgent buyer |
-| `RESOURCE_MAX_STOCK` | 100 | Above this = saturated |
+| `RESOURCE_MIN_NEED` | **15** | Urgent buy threshold (was 20) |
+| `RESOURCE_MAX_STOCK` | **200** | Saturation cap (was 100) |
 | `RESOURCE_START_STOCK` | 40 | Starting stock per resource |
-| `RESOURCE_OWN_PRODUCTION` | 15 | Own resource produced per tick |
-| `RESOURCE_CONSUMPTION` | 8 | Each resource consumed per tick |
-| `RESOURCE_URGENT_PREMIUM` | 1.5 | 50% price premium for urgent buys |
-| `RESOURCE_TRADE_AMOUNT` | 12 | Units per trade ship per route |
+| `RESOURCE_OWN_PRODUCTION` | **20** | Own production per tick (was 15) |
+| `RESOURCE_CONSUMPTION` | **4** | Consumption per resource per tick (was 8) |
+| `RESOURCE_URGENT_PREMIUM` | 1.5 | Premium when stock < MIN_NEED |
+| `RESOURCE_TRADE_AMOUNT` | **6** | Units shipped per ship per route (was 12) |
+
+### Trade
+| Constant | Current | Description |
+|---|---|---|
+| `BASE_EXPORT_INCOME` | **160g** | Total base income split across routes (was 95) |
+| `BASE_ROUTE_INCOME_FLOOR` | **10g** | Minimum per active route (new in v5.2) |
+| `IMPORT_SPEND_RATIO` | 0.55 | Imports = 55% of exports |
+| `FREE_TRADE_BONUS` | **0.65** | Multiplier in free trade scenario (was 0.40) |
+| `ALLIANCE_TRADE_BONUS` | 0.30 | +30% on allied routes |
 
 ### Economy Tiers
 | Constant | Value | Description |
 |---|---|---|
-| `TIER_THRESHOLD_MANUFACTURE` | 1,400g | Wealth to unlock tier 2 |
-| `TIER_THRESHOLD_TECHNOLOGY` | 2,200g | Wealth to unlock tier 3 |
-| `RAW_PRICE` | 1.0 | Raw goods multiplier |
+| `TIER_THRESHOLD_MANUFACTURE` | 1,400g | Wealth for tier 2 |
+| `TIER_THRESHOLD_TECHNOLOGY` | 2,200g | Wealth for tier 3 |
+| `RAW_PRICE` | 1.0 | Raw resource multiplier |
 | `MANUFACTURED_PRICE` | 2.2 | Manufactured goods multiplier |
 | `TECHNOLOGY_PRICE` | 4.0 | Technology multiplier |
 
 ### Military
-| Constant | Value | Description |
+| Constant | Current | Description |
 |---|---|---|
-| `INITIAL_TRADE_SHIPS` | 2 | Starting trade ships |
 | `INITIAL_WARSHIPS` | 1 | Starting warships |
-| `WARSHIP_COST_PER_TICK` | 30g | Maintenance per warship per tick |
-| `PLUNDER_SUCCESS_RATE` | 0.45 | Raid success chance per warship |
-| `PLUNDER_AMOUNT` | 85g | Gold seized per successful raid |
-| `MAX_WARSHIPS` | 8 | Maximum warships per nation |
-| `ARMS_RACE_ALPHA` | 1.25 | Richardson model coefficient |
-| `ARMS_RACE_BETA` | 15 | Richardson model constant |
+| `WARSHIP_COST_PER_TICK` | 30g | Maintenance per warship |
+| `MAX_WARSHIPS` | **4** | Cap (was 8) |
+| `PLUNDER_SUCCESS_RATE` | **0.20** | Raid chance per warship (was 0.45) |
+| `PLUNDER_AMOUNT` | **50g** | Gold per successful raid (was 85) |
+| `ARMS_RACE_ALPHA` | **0.70** | Richardson coefficient (was 1.25; now < 1 = convergent) |
+| `ARMS_RACE_BETA` | **20** | Richardson constant (was 15) |
 
-### Privateers
-| Constant | Value | Description |
+### Tariffs
+| Constant | Current | Description |
 |---|---|---|
-| `PRIVATEER_COMMISSION_COST` | 120g | Cost per privateer |
-| `PRIVATEER_SUCCESS_RATE` | 0.55 | Base interception chance |
-| `PRIVATEER_PLUNDER_AMOUNT` | 65g | Gold per privateer success |
-
-### Sabotage
-| Constant | Value | Description |
-|---|---|---|
-| `SABOTAGE_COST` | 70g | Operation cost |
-| `SABOTAGE_ATTEMPT_CHANCE` | 0.28 | Probability of attempt per tick |
-| `SABOTAGE_SUCCESS_RATE` | 0.55 | Success probability |
-
-### Diplomacy
-| Constant | Value | Description |
-|---|---|---|
-| `ALLIANCE_TRADE_BONUS` | 0.30 | +30% trade on allied routes |
-| `EMBARGO_TRADE_MULTIPLIER` | 0.0 | Complete trade block |
-| `TARIFF_RATE` | 0.50 | 50% income reduction per tariff |
-| `TARIFF_START_TICK` | 2 | Earliest tick for tariff imposition |
-| `RETALIATION_DELAY` | 1 | Ticks before retaliatory tariff |
+| `TARIFF_RATE` | 0.50 | 50% income reduction |
+| `TARIFF_START_TICK` | 2 | Earliest tick |
+| `TARIFF_RIVAL_WEALTH_RATIO` | **1.15** | Trigger: rival 15%+ richer (new v5.3) |
+| `RETALIATION_DELAY` | 1 | Ticks before retaliation |
 
 ### Relationships
-| Constant | Value | Description |
+| Constant | Current | Description |
 |---|---|---|
-| `RELATION_INITIAL` | 50 | Starting relationship score |
-| `RELATION_ALLIANCE_THRESHOLD` | 75 | Score needed for alliance |
-| `RELATION_EMBARGO_THRESHOLD` | 25 | Score threshold for embargo |
-| `RELATION_RAID_THRESHOLD` | 35 | Score below which raids happen |
-| `RELATION_TRADE_BONUS_RATE` | 0.003 | Trade bonus per point above 50 |
-| `RELATION_TRADE_PENALTY_RATE` | 0.005 | Trade penalty per point below 50 |
-| `RELATION_DECAY_RATE` | 1 | Drift toward 50 per tick |
-| `RELATION_RAID_PENALTY` | -15 | Relation hit from raiding |
-| `RELATION_TRADE_BOOST` | +2 | Relation gain from trading |
-| `RELATION_ALLIANCE_BOOST` | +5 | Relation gain from being allied |
-| `RELATION_EMBARGO_DRAIN` | -3 | Relation loss from embargo |
-| `RELATION_NEED_SUPPLIER_BOOST` | +4 | Boost toward needed supplier |
-| `RELATION_NEED_EMBARGO_PENALTY` | -6 | Extra penalty when embargoed by supplier |
-| `RELATION_NEED_FULFILLED_BOOST` | +3 | Boost when supplier delivers needed resource |
-| `RELATION_NEED_DESPERATE_RAID` | -8 | Penalty toward hoarding nations |
+| `RELATION_INITIAL` | 50 | Neutral starting score |
+| `RELATION_ALLIANCE_THRESHOLD` | 75 | Score for alliance |
+| `RELATION_EMBARGO_THRESHOLD` | **22** | Score for embargo (was 25, then 10) |
+| `RELATION_RAID_THRESHOLD` | **30** | Privateer trigger (was 35) |
+| `RELATION_DECAY_RATE` | **1** | Drift/tick toward 50 (was 3 in v5.2) |
+| `RELATION_TRADE_BOOST` | **3** | Per trade (was 2) |
+| `RELATION_ALLIANCE_BOOST` | 5 | Per allied tick |
+| `RELATION_EMBARGO_DRAIN` | **−1** | Per embargoed tick (was −3) |
+| `RELATION_RAID_VICTIM` | **−10** | Victim penalty per raid (was −25) |
+| `RELATION_RAID_AGGRESSOR` | **−3** | Attacker penalty (was −5) |
+| `RELATION_SABOTAGE_VICTIM_OK` | −30 | Successful sabotage |
+| `RELATION_TARIFF_VICTIM` | −12 | Tariff target resentment |
 
-### Degradation
+### Degradation & Aid
 | Constant | Value | Description |
 |---|---|---|
-| `DEGRADE_THRESHOLD_STRUGGLING` | 600g | Below this = struggling |
-| `DEGRADE_THRESHOLD_CRITICAL` | 250g | Below this = critical |
-| `DEGRADE_THRESHOLD_BANKRUPT` | 100g | Below this = bankrupt |
-| `DEGRADE_EXPORT_PENALTY_STRUGGLING` | 0.80 | 20% export reduction |
-| `DEGRADE_EXPORT_PENALTY_CRITICAL` | 0.55 | 45% export reduction |
-| `DEGRADE_EXPORT_PENALTY_BANKRUPT` | 0.30 | 70% export reduction |
-
-### Random Events
-| Constant | Value | Description |
-|---|---|---|
-| `EVENT_CHANCE_PER_TICK` | 0.40 | 40% chance per tick |
-| `EVENT_GOLD_RUSH_BONUS` | 250g | Gold rush windfall |
-| `EVENT_PLAGUE_LOSS` | 200g | Maximum plague damage |
+| `DEGRADE_THRESHOLD_STRUGGLING` | 600g | Below = struggling |
+| `DEGRADE_THRESHOLD_CRITICAL` | 250g | Below = critical |
+| `DEGRADE_THRESHOLD_BANKRUPT` | 100g | Below = bankrupt |
+| `FOREIGN_AID_RATIO` | 0.10 | Donor gives 10% of wealth |
+| `FOREIGN_AID_MIN_DONOR_WEALTH` | 500g | Donor must have ≥ 500g |
 
 ---
 
-## 18. Academic Framework
+## 20. Academic Framework
 
 ### Economic Theories Modeled
 
-| Simulation Mechanic | Economic Concept | Academic Source |
+| Mechanic | Theory | Source |
 |---|---|---|
-| Tariff → retaliation cascade | Trade war / Nash equilibrium | Nash (1950); Smoot-Hawley Tariff Act (1930) |
-| Free trade raises global wealth | Positive-sum trade theory | Adam Smith, *Wealth of Nations* (1776), Book IV |
-| Resource specialization & trade | Comparative advantage | David Ricardo, *Principles of Political Economy* (1817), Ch. 7 |
-| Arms race formula | Richardson arms race model | Lewis F. Richardson, *Arms and Insecurity* (1960) |
-| Privateer / alliance / embargo AI | Iterated Prisoner's Dilemma | Robert Axelrod, *The Evolution of Cooperation* (1984) |
-| Tariff deadweight loss | Consumer/producer surplus loss | Paul Samuelson, *Economics* (1948) |
-| Resource dependency shaping alliances | Interdependence theory | Robert Keohane & Joseph Nye, *Power and Interdependence* (1977) |
-| Gini coefficient measurement | Wealth inequality | Corrado Gini, *Variabilità e mutabilità* (1912) |
+| Free trade raises global wealth | Positive-sum trade / comparative advantage | Adam Smith (1776); Ricardo (1817) |
+| Tariff → retaliation cascade | Trade war / Nash equilibrium | Nash (1950); Smoot-Hawley (1930) |
+| Arms race formula | Richardson mutual-reaction model | Richardson, *Arms and Insecurity* (1960) |
+| Alliance / embargo / privateer AI | Iterated Prisoner's Dilemma | Axelrod, *Evolution of Cooperation* (1984) |
+| Resource dependency diplomacy | Interdependence theory | Keohane & Nye, *Power and Interdependence* (1977) |
+| Gini inequality measurement | Wealth distribution | Gini (1912) |
 
-### Historical Parallels
+### Version History of Key Changes
 
-| Mechanic | Historical Event |
-|---|---|
-| Tariff + retaliation | Navigation Acts 1651/1660 (England vs Netherlands) |
-| Naval arms race | Anglo-Dutch Wars 1652–1674 |
-| Privateer commission | Francis Drake's Letters of Marque (1577); Jean Bart (1690s) |
-| Harbour sabotage | Dutch Medway Raid 1667 |
-| Embargo declaration | Navigation Acts excluding Dutch carriers |
-| Alliance + trade bonus | Cobden-Chevalier Treaty 1860; Anglo-Portuguese Treaty 1386 |
-| Mercantilist policy | Jean-Baptiste Colbert's France under Louis XIV (1661–1683) |
-| Trade company monopoly | VOC (Dutch East India Company) joint-stock trade |
-| Resource dependency diplomacy | British dependence on Baltic timber for naval shipbuilding |
+| Version | Key Fix | Impact |
+|---|---|---|
+| v4.0 | Bilateral relationship system | Diplomacy driven by scores, not wealth |
+| v4.1 | Resource-need diplomacy | Alliance/embargo shaped by supply dependency |
+| v5.0 | Allied foreign aid; ally-safe raids; asymmetric relations | Death spiral recovery; realistic diplomacy |
+| v5.1 | ALPHA < 1; plunder rate/amount halved; MAX_WARSHIPS 8→4 | Stopped universal bankruptcy by tick 8 |
+| v5.2 | Resource balance (CONSUMPTION 8→4, TRADE_AMOUNT 12→6); embargo threshold 25→10; route floor income | Stopped free trade income collapse by tick 5 |
+| v5.3 | Tariff trigger fixed (wealth rivalry, not negative balance); EMBARGO_THRESHOLD 10→22; DECAY 3→1; FREE_TRADE_BONUS 0.40→0.65; nation names → Endava/Amdaris/GridDynamics/Globant | Diplomacy now fires; correct academic result (free trade > mercantilist) |

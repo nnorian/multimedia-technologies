@@ -113,7 +113,17 @@ end
 
 -- ─── Relationship System ────────────────────────────────────────────────────
 
+-- Returns the average of both directions (used for trade modifiers, display)
 function NationState.getRelation(id1, id2)
+    local r1 = Config.RELATION_INITIAL
+    local r2 = Config.RELATION_INITIAL
+    if _relations[id1] then r1 = _relations[id1][id2] or Config.RELATION_INITIAL end
+    if _relations[id2] then r2 = _relations[id2][id1] or Config.RELATION_INITIAL end
+    return (r1 + r2) / 2
+end
+
+-- Returns how id1 feels about id2 specifically (used for diplomatic decisions)
+function NationState.getRelationFrom(id1, id2)
     if not _relations[id1] then return Config.RELATION_INITIAL end
     return _relations[id1][id2] or Config.RELATION_INITIAL
 end
@@ -123,9 +133,20 @@ function NationState.changeRelation(id1, id2, delta)
     if not _relations[id2] then _relations[id2] = {} end
     local current1 = _relations[id1][id2] or Config.RELATION_INITIAL
     local current2 = _relations[id2][id1] or Config.RELATION_INITIAL
-    -- Symmetric change
+    -- Symmetric change (used for mutual events: trade, alliance, decay)
     _relations[id1][id2] = math.clamp(current1 + delta, 0, 100)
     _relations[id2][id1] = math.clamp(current2 + delta, 0, 100)
+end
+
+-- Asymmetric: aggressor gets deltaAggressor, victim gets deltaVictim
+-- Used for raids, sabotage, tariffs — where attacker and victim feel differently
+function NationState.changeRelationDirected(aggressorId, victimId, deltaAggressor, deltaVictim)
+    if not _relations[aggressorId] then _relations[aggressorId] = {} end
+    if not _relations[victimId] then _relations[victimId] = {} end
+    local currentAgg = _relations[aggressorId][victimId] or Config.RELATION_INITIAL
+    local currentVic = _relations[victimId][aggressorId] or Config.RELATION_INITIAL
+    _relations[aggressorId][victimId] = math.clamp(currentAgg + deltaAggressor, 0, 100)
+    _relations[victimId][aggressorId] = math.clamp(currentVic + deltaVictim, 0, 100)
 end
 
 function NationState.setRelation(id1, id2, value)
@@ -135,16 +156,17 @@ function NationState.setRelation(id1, id2, value)
     _relations[id2][id1] = math.clamp(value, 0, 100)
 end
 
--- Decay relations toward neutral each tick
+-- Decay relations toward neutral each tick (each direction independently)
 function NationState.decayRelations()
     for _, n in ipairs(_nationList) do
         for _, m in ipairs(_nationList) do
-            if m.id > n.id then
+            if m.id ~= n.id then
+                if not _relations[n.id] then _relations[n.id] = {} end
                 local current = _relations[n.id][m.id] or Config.RELATION_INITIAL
                 if current > Config.RELATION_INITIAL then
-                    NationState.changeRelation(n.id, m.id, -Config.RELATION_DECAY_RATE)
+                    _relations[n.id][m.id] = math.clamp(current - Config.RELATION_DECAY_RATE, 0, 100)
                 elseif current < Config.RELATION_INITIAL then
-                    NationState.changeRelation(n.id, m.id, Config.RELATION_DECAY_RATE)
+                    _relations[n.id][m.id] = math.clamp(current + Config.RELATION_DECAY_RATE, 0, 100)
                 end
             end
         end
@@ -285,8 +307,9 @@ function NationState.setTariff(fromId, targetId, enabled)
             end
             _retaliationCountdown[targetId][fromId] = Config.RETALIATION_DELAY
         end
-        -- Tariffs damage relations
-        NationState.changeRelation(fromId, targetId, -8)
+        -- Tariffs damage relations asymmetrically
+        NationState.changeRelationDirected(fromId, targetId,
+            Config.RELATION_TARIFF_AGGRESSOR, Config.RELATION_TARIFF_VICTIM)
     end
 end
 

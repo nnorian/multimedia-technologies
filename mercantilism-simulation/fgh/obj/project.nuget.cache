@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "dgSpecHash": "Weol0JfyboTfSyh2xLh9WWYRtGrzLZyijnJU7Kz1kQPo11L0QKOSxw09EmGzWNYn+FTz55b/dU5+BrPkrrXb5w==",
+  "success": true,
+  "projectFilePath": "/home/nnorian/dev/sem4/multimedia-technologies/mercantilism-simulation/fgh/fgh.csproj",
+  "expectedPackageFiles": [
+    "/home/nnorian/.nuget/packages/microsoft.aspnetcore.app.ref/8.0.25/microsoft.aspnetcore.app.ref.8.0.25.nupkg.sha512"
+  ],
+  "logs": []
+}

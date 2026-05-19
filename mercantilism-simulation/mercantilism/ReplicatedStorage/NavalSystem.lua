@@ -13,43 +13,38 @@ local NavalSystem = {}
 -- Applies plunder directly to the nations table entries.
 -- Returns plunderResults: table { [victimId] = totalStolen, [plunderId/attackerId] = totalGained }
 -- Gains and losses are both tracked in the same table with separate keys.
-function NavalSystem.resolvePlunder(nations, scenario)
+function NavalSystem.resolvePlunder(nations, scenario, getDiploState)
     -- Skip plunder in free trade scenario
     if scenario == Config.SCENARIOS.FREE_TRADE then
         return {}
     end
 
     local plunderResults = {}
-    -- plunderResults[nationId] stores both stolen (negative) and gained (positive) separately
-    -- Use a structured log instead:
-    -- plunderLog[nationId] = { gained = number, lost = number }
     local plunderLog = {}
 
     for _, nation in ipairs(nations) do
         plunderLog[nation.id] = { gained = 0, lost = 0 }
     end
 
-    -- For each attacker nation, attempt to plunder each rival
+    -- For each attacker nation, attempt to plunder each rival (skip allies)
     for _, attacker in ipairs(nations) do
         if attacker.warships > 0 then
             for _, victim in ipairs(nations) do
                 if victim.id ~= attacker.id then
-                    -- Each warship of the attacker has PLUNDER_SUCCESS_RATE chance
-                    -- to intercept a trade ship of the victim
-                    for _ = 1, attacker.warships do
-                        if victim.tradeShips > 0 then
-                            local roll = math.random()
-                            if roll <= Config.PLUNDER_SUCCESS_RATE then
-                                -- Successful intercept
-                                local amount = math.min(Config.PLUNDER_AMOUNT, victim.wealth)
-                                if amount > 0 then
-                                    -- Transfer wealth
-                                    victim.wealth  = math.max(0, victim.wealth - amount)
-                                    attacker.wealth = attacker.wealth + amount
-
-                                    -- Accumulate into plunder tracking
-                                    plunderLog[victim.id].lost    = plunderLog[victim.id].lost + amount
-                                    plunderLog[attacker.id].gained = plunderLog[attacker.id].gained + amount
+                    -- Skip allied nations — warships don't raid allies
+                    local diploState = getDiploState and getDiploState(attacker.id, victim.id) or "neutral"
+                    if diploState ~= "allied" then
+                        for _ = 1, attacker.warships do
+                            if victim.tradeShips > 0 then
+                                local roll = math.random()
+                                if roll <= Config.PLUNDER_SUCCESS_RATE then
+                                    local amount = math.min(Config.PLUNDER_AMOUNT, victim.wealth)
+                                    if amount > 0 then
+                                        victim.wealth  = math.max(0, victim.wealth - amount)
+                                        attacker.wealth = attacker.wealth + amount
+                                        plunderLog[victim.id].lost    = plunderLog[victim.id].lost + amount
+                                        plunderLog[attacker.id].gained = plunderLog[attacker.id].gained + amount
+                                    end
                                 end
                             end
                         end
@@ -126,12 +121,19 @@ function NavalSystem.updateNavySize(nation, allNations, currentTick, scenario)
     local targetWarships = math.floor(targetCost / Config.WARSHIP_COST_PER_TICK)
     targetWarships = math.max(1, math.min(Config.MAX_WARSHIPS, targetWarships))
 
-    -- Only build if we can afford it
-    local canAfford = nation.wealth > (Config.WARSHIP_COST_PER_TICK * 5)
+    -- Only build if we can afford it (require 10-tick buffer, not 5)
+    local canAfford = nation.wealth > (Config.WARSHIP_COST_PER_TICK * 10)
     if targetWarships > nation.warships and canAfford then
         nation.warships = nation.warships + 1
         print(string.format(
             "[NavalSystem] %s builds a new warship (now %d warships). Arms race escalation.",
+            nation.name, nation.warships
+        ))
+    elseif targetWarships < nation.warships then
+        -- Voluntary disarmament when threat recedes (alpha < 1 makes this reachable)
+        nation.warships = math.max(1, nation.warships - 1)
+        print(string.format(
+            "[NavalSystem] %s decommissions a warship (now %d). Threat has receded.",
             nation.name, nation.warships
         ))
     end

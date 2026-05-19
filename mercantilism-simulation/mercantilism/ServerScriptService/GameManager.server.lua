@@ -1,4 +1,4 @@
--- GameManager.server.lua (v4 — resource economy, relationship-based trade, animations)
+-- GameManager.server.lua (v5 — death spiral recovery, ally-safe raids, asymmetric diplomacy)
 -- Server Script: main game loop, orchestrates the simulation
 -- Place in ServerScriptService
 
@@ -765,7 +765,7 @@ local function runSimulation(scenario)
         -- 6. Resolve plunder — with explosion animations
         local plunderGainedMap = {}
         local plunderLostMap   = {}
-        local plunderLog = NavalSystem.resolvePlunder(allNations, scenario)
+        local plunderLog = NavalSystem.resolvePlunder(allNations, scenario, DiplomacySystem.getState)
         for key, amount in pairs(plunderLog) do
             if type(key) == "number" then
                 plunderGainedMap[key] = (plunderGainedMap[key] or 0) + amount
@@ -791,8 +791,9 @@ local function runSimulation(scenario)
                                     + Vector3.new((math.random() - 0.5) * 30, 0, (math.random() - 0.5) * 30)
                                 playExplosion(midPoint)
 
-                                -- Raids severely damage relations
-                                NationState.changeRelation(key, victim.id, Config.RELATION_RAID_PENALTY)
+                                -- Raids damage relations asymmetrically
+                                NationState.changeRelationDirected(key, victim.id,
+                                    Config.RELATION_RAID_AGGRESSOR, Config.RELATION_RAID_VICTIM)
                             end
                         end
                     end
@@ -893,6 +894,29 @@ local function runSimulation(scenario)
         end
         for _, msg in ipairs(degradeLogs) do
             table.insert(tickLogs, msg)
+        end
+
+        -- 8.55 Allied foreign aid (death spiral recovery)
+        for _, nation in ipairs(allNations) do
+            local level = nation.degradationLevel or "healthy"
+            if level == "critical" or level == "bankrupt" then
+                for _, donor in ipairs(allNations) do
+                    if donor.id ~= nation.id
+                        and DiplomacySystem.getState(nation.id, donor.id) == "allied"
+                        and donor.wealth >= Config.FOREIGN_AID_MIN_DONOR_WEALTH then
+                        local aid = math.floor(donor.wealth * Config.FOREIGN_AID_RATIO)
+                        if aid > 0 then
+                            donor.wealth = donor.wealth - aid
+                            nation.wealth = nation.wealth + aid
+                            NationState.changeRelation(nation.id, donor.id, Config.FOREIGN_AID_RELATION_BOOST)
+                            table.insert(tickLogs, string.format(
+                                "[AID] %s sends %dg foreign aid to struggling ally %s!",
+                                donor.name, aid, nation.name
+                            ))
+                        end
+                    end
+                end
+            end
         end
 
         -- 8.6 Record tick snapshot

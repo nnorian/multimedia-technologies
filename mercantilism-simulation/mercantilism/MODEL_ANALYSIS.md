@@ -379,11 +379,11 @@ storm_risk = base_storm_chance × (distance / REFERENCE_DISTANCE)
 | Priority | Issue | Current Impact | Fix Complexity |
 |---|---|---|---|
 | **Critical** | Plunder >> trade income (10.1) | Breaks strategic balance | Low — adjust constants |
-| **Critical** | Death spiral with no recovery (6.1) | Nations collapse irreversibly | Low — add aid/loans |
+| ~~**Critical**~~ | ~~Death spiral with no recovery (6.1)~~ | ~~Nations collapse irreversibly~~ | **FIXED** — allied foreign aid (10% of donor wealth to critical/bankrupt allies) |
 | **High** | No supply-demand pricing (1.1) | Flat, unresponsive market | Medium — new price function |
-| **High** | Warship raids hit allies (5.2) | Contradicts diplomacy | Low — add state check |
+| ~~**High**~~ | ~~Warship raids hit allies (5.2)~~ | ~~Contradicts diplomacy~~ | **FIXED** — plunder skips allied nations |
 | **High** | Import cost decoupled from goods (1.3) | Unrealistic balance-of-trade | Medium — restructure |
-| **High** | Symmetric relationship changes (3.1) | Unrealistic diplomacy | Medium — asymmetric matrix |
+| ~~**High**~~ | ~~Symmetric relationship changes (3.1)~~ | ~~Unrealistic diplomacy~~ | **FIXED** — asymmetric directed relations (aggressor -5/-8, victim -25/-30) |
 | **Medium** | Richardson model oversimplified (2.1) | Weak arms dynamics | Medium — full model |
 | **Medium** | Instant tier regression (8.1) | Fragile progression | Low — add hysteresis |
 | **Medium** | Multiplicative extreme values (1.2) | Runaway divergence | Low — compress extremes |
@@ -391,7 +391,7 @@ storm_risk = base_storm_chance × (distance / REFERENCE_DISTANCE)
 | **Low** | Step-function degradation (6.2) | Minor discontinuity | Low — continuous curve |
 | **Low** | Constant production/consumption (7.1, 7.2) | Oversimplified | Low — scale by state |
 | **Low** | Uniform random events (9.1) | Variance-driven outcomes | Low — weighted selection |
-| **Low** | No spatial trade cost (10.3) | Wasted visual design | Medium — distance calc |
+| ~~**Low**~~ | ~~No spatial trade cost (10.3)~~ | ~~Wasted visual design~~ | **FIXED** — distance-based trade efficiency (1/(1 + d/320 × 0.3)) |
 
 ---
 

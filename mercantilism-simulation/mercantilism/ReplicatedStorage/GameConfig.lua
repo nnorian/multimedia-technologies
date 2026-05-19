@@ -36,46 +36,48 @@ Config.TECHNOLOGY_PRICE      = 4.0   -- technology sells for 4x raw price
 -- ─── Resource Needs & Saturation ─────────────────────────────────────────────
 -- Each nation needs all 4 raw resources to function
 -- They produce their own, must buy the other 3
-Config.RESOURCE_MIN_NEED      = 20    -- below this → urgent buyer (pays premium)
-Config.RESOURCE_MAX_STOCK     = 100   -- above this → saturated, won't buy more
+Config.RESOURCE_MIN_NEED      = 15    -- below this → urgent buyer (pays premium)
+Config.RESOURCE_MAX_STOCK     = 200   -- was 100; takes 40+ ticks to saturate (beyond game length)
 Config.RESOURCE_START_STOCK   = 40    -- starting stock for each resource
-Config.RESOURCE_OWN_PRODUCTION = 15   -- amount of own resource produced per tick
-Config.RESOURCE_CONSUMPTION    = 8    -- amount of each resource consumed per tick
+Config.RESOURCE_OWN_PRODUCTION = 20   -- was 15; ensures stock never depletes (20 - 4cons - 12sold = +4/tick)
+Config.RESOURCE_CONSUMPTION    = 4    -- was 8; balanced with trade amount so imports = consumption
 Config.RESOURCE_URGENT_PREMIUM = 1.5  -- 50% price premium when below min need
-Config.RESOURCE_TRADE_AMOUNT   = 12   -- units shipped per trade ship per route
+Config.RESOURCE_TRADE_AMOUNT   = 6    -- was 12; halved so buyer receives ≈ consumption per tick
 
 -- ─── Nations ─────────────────────────────────────────────────────────────────
 
 Config.NATIONS = {
-    { id = 1, name = "Ironhaven",    color = Color3.fromRGB(0, 36, 125),  resource = "Ore",   position = Vector3.new(-160, 1, -160) },
-    { id = 2, name = "Goldspire",    color = Color3.fromRGB(0, 85, 164),  resource = "Herbs", position = Vector3.new(160, 1, -160)  },
-    { id = 3, name = "Emberveil",    color = Color3.fromRGB(170, 21, 27), resource = "Meat",  position = Vector3.new(-160, 1, 160)  },
-    { id = 4, name = "Drifthollow",  color = Color3.fromRGB(255, 174, 0), resource = "Logs",  position = Vector3.new(160, 1, 160)   },
+    { id = 1, name = "Endava",         color = Color3.fromRGB(0, 36, 125),  resource = "Ore",   position = Vector3.new(-160, 1, -160) },
+    { id = 2, name = "Amdaris",        color = Color3.fromRGB(0, 85, 164),  resource = "Herbs", position = Vector3.new(160, 1, -160)  },
+    { id = 3, name = "GridDynamics",   color = Color3.fromRGB(170, 21, 27), resource = "Meat",  position = Vector3.new(-160, 1, 160)  },
+    { id = 4, name = "Globant",        color = Color3.fromRGB(255, 174, 0), resource = "Logs",  position = Vector3.new(160, 1, 160)   },
 }
 
 Config.INITIAL_WEALTH         = 1000
 Config.TICK_DURATION          = 12      -- seconds per trading season
 Config.MAX_TICKS              = 24
 
-Config.BASE_EXPORT_INCOME     = 95      -- base gold per trade route
+Config.BASE_EXPORT_INCOME     = 160     -- was 95 — split across 3 routes = ~53g each; ~120g total after distance
+Config.BASE_ROUTE_INCOME_FLOOR = 10    -- minimum income per active non-embargoed route (services/luxury goods)
 Config.RESOURCE_BONUS         = 35      -- bonus when resource is demanded
 Config.IMPORT_SPEND_RATIO     = 0.55
 
 Config.TARIFF_RATE            = 0.50
 Config.TARIFF_START_TICK      = 2
+Config.TARIFF_RIVAL_WEALTH_RATIO = 1.15  -- impose tariff when rival has 15%+ more wealth
 Config.RETALIATION_DELAY      = 1
 
 Config.INITIAL_TRADE_SHIPS    = 2
 Config.INITIAL_WARSHIPS       = 1
 Config.WARSHIP_COST_PER_TICK  = 30
-Config.PLUNDER_SUCCESS_RATE   = 0.45
-Config.PLUNDER_AMOUNT         = 85
-Config.MAX_WARSHIPS           = 8
+Config.PLUNDER_SUCCESS_RATE   = 0.20   -- was 0.45 — 1 warship × 3 victims = 0.6 hits/tick
+Config.PLUNDER_AMOUNT         = 50    -- was 85 — prevents quadratic death at 4 warships
+Config.MAX_WARSHIPS           = 4     -- was 8 — caps arms race damage ceiling
 
-Config.ARMS_RACE_ALPHA        = 1.25
-Config.ARMS_RACE_BETA         = 15
+Config.ARMS_RACE_ALPHA        = 0.70  -- was 1.25 — MUST be < 1 for convergent arms race
+Config.ARMS_RACE_BETA         = 20    -- was 15
 
-Config.FREE_TRADE_BONUS       = 0.40
+Config.FREE_TRADE_BONUS       = 0.65   -- was 0.40; widens the W_global gap for academic clarity
 
 -- Degradation thresholds
 Config.DEGRADE_THRESHOLD_STRUGGLING       = 600
@@ -100,6 +102,10 @@ Config.SHIP_SPEED   = 45
 
 Config.SCENARIOS = { MERCANTILIST = "mercantilist", FREE_TRADE = "freetrade" }
 
+-- Spatial trade model: distance affects trade efficiency and storm risk
+Config.TRADE_REFERENCE_DISTANCE   = 320   -- baseline distance (diagonal of the map ~452)
+Config.TRADE_DISTANCE_PENALTY     = 0.3   -- how much distance reduces efficiency (0-1)
+
 -- ─── Privateer System ─────────────────────────────────────────────────────────
 Config.PRIVATEER_COMMISSION_COST  = 120
 Config.PRIVATEER_SUCCESS_RATE     = 0.55
@@ -118,15 +124,28 @@ Config.EMBARGO_TRADE_MULTIPLIER   = 0.0
 -- Bilateral relationship score drives interactions (not just internal state)
 Config.RELATION_INITIAL          = 50   -- neutral starting point (0-100 scale)
 Config.RELATION_ALLIANCE_THRESHOLD = 75  -- above this → can form alliance
-Config.RELATION_EMBARGO_THRESHOLD  = 25  -- below this → can declare embargo
-Config.RELATION_RAID_THRESHOLD     = 35  -- below this → more likely to raid
+Config.RELATION_EMBARGO_THRESHOLD  = 22  -- reachable via sustained raiding + tariff retaliation
+Config.RELATION_RAID_THRESHOLD     = 30  -- was 35; slightly harder to trigger privateers
 Config.RELATION_TRADE_BONUS_RATE   = 0.003 -- per point above 50, trade gets bonus
 Config.RELATION_TRADE_PENALTY_RATE = 0.005 -- per point below 50, trade gets penalty
-Config.RELATION_DECAY_RATE         = 1   -- relations drift toward 50 per tick
-Config.RELATION_RAID_PENALTY       = -15 -- raiding hurts relations
-Config.RELATION_TRADE_BOOST        = 2   -- successful trade improves relations
+Config.RELATION_DECAY_RATE         = 1   -- slower decay allows alliances to form over time
+Config.RELATION_RAID_PENALTY       = -5  -- raiding hurts relations (legacy symmetric)
+Config.RELATION_RAID_AGGRESSOR     = -3  -- attacker's view of victim worsens slightly
+Config.RELATION_RAID_VICTIM        = -10 -- was -25; one raid no longer instantly pushes to embargo
+Config.RELATION_SABOTAGE_AGGRESSOR = -8  -- attacker's view after sabotage
+Config.RELATION_SABOTAGE_VICTIM_OK = -30 -- victim's view after successful sabotage
+Config.RELATION_SABOTAGE_VICTIM_FAIL = -15 -- victim's view after failed (uncovered) sabotage
+Config.RELATION_TARIFF_AGGRESSOR   = -3  -- imposer's view of target
+Config.RELATION_TARIFF_VICTIM      = -12 -- target resents tariff imposer
+Config.RELATION_TRADE_BOOST        = 3   -- was 2; allows relations to climb toward alliance threshold
 Config.RELATION_ALLIANCE_BOOST     = 5   -- being allied improves relations
-Config.RELATION_EMBARGO_DRAIN      = -3  -- embargo worsens relations
+Config.RELATION_EMBARGO_DRAIN      = -1  -- was -3; slower drain prevents cascade from 1 embargo infecting others
+
+-- Allied foreign aid (death spiral recovery)
+Config.FOREIGN_AID_THRESHOLD        = "critical"  -- ally must be critical or bankrupt
+Config.FOREIGN_AID_RATIO            = 0.10         -- donor gives 10% of own wealth
+Config.FOREIGN_AID_MIN_DONOR_WEALTH = 500          -- donor must have at least 500g to give aid
+Config.FOREIGN_AID_RELATION_BOOST   = 8            -- aid improves relations
 
 -- Resource-need driven diplomacy
 Config.RELATION_NEED_SUPPLIER_BOOST   = 4   -- boost toward nation producing resource we urgently need
